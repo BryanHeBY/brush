@@ -37,6 +37,10 @@ pub struct UiConfig {
     /// Enable syntax highlighting in the input line.
     #[serde(rename = "syntax-highlighting")]
     pub syntax_highlighting: Option<bool>,
+
+    /// Browse visible history suggestions with Up and Down and accept with Right.
+    #[serde(rename = "history-suggestion-navigation")]
+    pub history_suggestion_navigation: Option<bool>,
 }
 
 /// Experimental features configuration.
@@ -94,6 +98,9 @@ impl Config {
             .disable_bracketed_paste(args.disable_bracketed_paste)
             .disable_color(args.disable_color)
             .disable_highlighting(!enable_highlighting)
+            .history_suggestion_navigation(
+                self.ui.history_suggestion_navigation.unwrap_or_default(),
+            )
             .terminal_shell_integration(terminal_shell_integration)
             .zsh_style_hooks(zsh_style_hooks)
             .build()

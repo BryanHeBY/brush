@@ -40,6 +40,14 @@
       "description": "User interface configuration options.",
       "type": "object",
       "properties": {
+        "history-suggestion-navigation": {
+          "description": "Browse visible history suggestions with Up and Down and accept with Right.",
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "default": null
+        },
         "syntax-highlighting": {
           "description": "Enable syntax highlighting in the input line.",
           "type": [

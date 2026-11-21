@@ -56,6 +56,7 @@ User interface settings.
 | Setting               | Type    | Default | CLI flag                | Description                                  |
 |-----------------------|---------|---------|-------------------------|----------------------------------------------|
 | `syntax-highlighting` | boolean | see below | `--enable-highlighting` | Enable syntax highlighting in the input line |
+| `history-suggestion-navigation` | boolean | `false` | | Browse visible history suggestions with Up and Down and accept with Right in the `reedline` backend |
 
 > The default value of `syntax-highlighting` depends on how `brush-shell`
 > was built: `true` when built with the `experimental` Cargo feature,
@@ -64,6 +65,13 @@ User interface settings.
 
 Syntax highlighting is supported by the `reedline` and `vt` input backends.
 The `--disable-color` flag also disables syntax highlighting.
+
+When a history suggestion is visible, `history-suggestion-navigation` lets Up and
+Down preview older or newer matches while leaving the typed line intact. Right
+accepts the displayed suggestion at the end of the line. In Emacs editing mode,
+Ctrl+Right accepts up to the start of the next word, including any separators
+crossed. When no suggestion is visible, Ctrl+Right moves the cursor by word,
+and Up and Down use their configured bindings.
 
 ### `[experimental]` Section
 

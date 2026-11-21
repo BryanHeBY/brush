@@ -68,11 +68,14 @@ impl reedline::EditMode for MutableEditMode {
         drop(inner);
         let default_tab = matches!(&event, reedline::ReedlineEvent::UntilFound(actions)
             if matches!(actions.first(), Some(reedline::ReedlineEvent::Menu(name)) if name == super::input_backend::COMPLETION_MENU_NAME));
-        readline
+        let event = readline
             .completion_event(&event, default_tab)
             .or_else(|| readline.comment_event(&event))
+            .or_else(|| readline.forward_word_event(&event))
             .or_else(|| readline.history_event(&event))
-            .unwrap_or(event)
+            .unwrap_or(event);
+        readline.remember_hint_acceptance(&event);
+        event
     }
 
     fn next_replay_event(&mut self) -> Option<reedline::ReedlineRawEvent> {

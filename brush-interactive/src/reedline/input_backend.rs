@@ -92,10 +92,11 @@ impl ReedlineInputBackend {
         shell_ref: &refs::ShellRef<impl brush_core::ShellExtensions>,
     ) -> Result<Self, ShellError> {
         // Set up key bindings.
-        let key_bindings = compose_key_bindings(COMPLETION_MENU_NAME);
+        let key_bindings =
+            compose_key_bindings(COMPLETION_MENU_NAME, options.history_suggestion_navigation);
 
         // Set up mutable edit mode.
-        let readline_session = readline::Session::default();
+        let readline_session = readline::Session::new(options.history_suggestion_navigation);
         let mutable_edit_mode =
             edit_mode::MutableEditMode::new(key_bindings, readline_session.clone());
         let updatable_bindings = mutable_edit_mode.bindings();
@@ -313,7 +314,10 @@ impl InputBackend for ReedlineInputBackend {
     }
 }
 
-fn compose_key_bindings(completion_menu_name: &str) -> reedline::Keybindings {
+fn compose_key_bindings(
+    completion_menu_name: &str,
+    history_suggestion_navigation: bool,
+) -> reedline::Keybindings {
     let mut key_bindings = reedline::default_emacs_keybindings();
 
     // Wire up tab to completion.
@@ -332,6 +336,19 @@ fn compose_key_bindings(completion_menu_name: &str) -> reedline::Keybindings {
         reedline::KeyCode::BackTab,
         reedline::ReedlineEvent::MenuPrevious,
     );
+    if history_suggestion_navigation {
+        key_bindings.add_binding(
+            reedline::KeyModifiers::CONTROL,
+            reedline::KeyCode::Right,
+            reedline::ReedlineEvent::UntilFound(vec![
+                reedline::ReedlineEvent::HistoryHintWordComplete,
+                reedline::ReedlineEvent::Edit(vec![reedline::EditCommand::MoveWordRightStart {
+                    select: false,
+                }]),
+            ]),
+        );
+    }
+
     // Add undo.
     key_bindings.add_binding(
         reedline::KeyModifiers::CONTROL,

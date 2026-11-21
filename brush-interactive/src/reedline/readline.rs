@@ -7,31 +7,34 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use brush_core::{ReadlineBellStyle, ReadlineOptions, history, interfaces::InputFunction};
 use crossterm::event::{Event, KeyEvent};
 use reedline::{KeyCode, KeyModifiers, ReedlineEvent};
+use unicode_segmentation::UnicodeSegmentation as _;
 
 use crate::{completion, refs};
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub(super) struct Session(Arc<Mutex<ReadlineSession>>);
 
 impl Session {
+    pub(super) fn new(navigate_suggestions: bool) -> Self {
+        Self(Arc::new(Mutex::new(ReadlineSession {
+            navigate_suggestions,
+            ..ReadlineSession::default()
+        })))
+    }
+
     pub(super) fn lock(&self) -> MutexGuard<'_, ReadlineSession> {
         self.0.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }
 
 pub(super) struct HistoryHinter {
-    inner: reedline::DefaultHinter,
     session: Session,
-    enabled: bool,
+    style: nu_ansi_term::Style,
 }
 
 impl HistoryHinter {
-    pub(super) fn new(session: Session, style: nu_ansi_term::Style) -> Self {
-        Self {
-            inner: reedline::DefaultHinter::default().with_style(style),
-            session,
-            enabled: false,
-        }
+    pub(super) const fn new(session: Session, style: nu_ansi_term::Style) -> Self {
+        Self { session, style }
     }
 }
 
@@ -42,39 +45,100 @@ impl reedline::Hinter for HistoryHinter {
         pos: usize,
         history: &dyn reedline::History,
         use_ansi_coloring: bool,
-        cwd: &str,
+        _: &str,
     ) -> String {
-        // Readline history actions do not enter Reedline's history mode.
-        self.enabled = pos == line.len()
-            && self
-                .session
-                .lock()
+        // The Readline history bindings replace the buffer without entering
+        // Reedline's history mode. Keep suggestions off the recalled entry.
+        let mut shared = self.session.lock();
+        if let Some(accepted) = shared
+            .suggestion_after_accept
+            .take()
+            .filter(|hint| hint.draft == line)
+        {
+            shared.suggestion = Some(accepted);
+        }
+        let selected = shared.suggestion.as_ref().filter(|hint| hint.draft == line);
+        if pos != line.len()
+            || line.is_empty()
+            || shared
                 .history
                 .as_ref()
-                .is_none_or(|search| search.last.text != line);
-        if self.enabled {
-            self.inner
-                .handle(line, pos, history, use_ansi_coloring, cwd)
+                .is_some_and(|search| search.last.text == line)
+        {
+            if selected.is_none_or(|hint| !hint.suffix.is_empty()) {
+                shared.suggestion = None;
+            }
+            return String::new();
+        }
+        let suffix = if shared.navigate_suggestions
+            && let Some(suggestion) = selected
+        {
+            suggestion.suffix.clone()
         } else {
-            String::new()
+            drop(shared);
+            let suggestion = history
+                .search(reedline::SearchQuery::last_with_prefix(
+                    line.to_owned(),
+                    history.session(),
+                ))
+                .ok()
+                .and_then(|items| items.into_iter().next())
+                .and_then(|item| {
+                    let suffix = item.command_line.get(line.len()..)?.to_owned();
+                    Some(HistorySuggestion {
+                        draft: line.to_owned(),
+                        suffix,
+                        id: item.id?.0,
+                    })
+                })
+                .filter(|suggestion| !suggestion.suffix.is_empty());
+            let suffix = suggestion
+                .as_ref()
+                .map_or_else(String::new, |hint| hint.suffix.clone());
+            self.session.lock().suggestion = suggestion;
+            suffix
+        };
+        if use_ansi_coloring && !suffix.is_empty() {
+            self.style.paint(suffix).to_string()
+        } else {
+            suffix
         }
     }
 
     fn complete_hint(&self) -> String {
-        if self.enabled {
-            self.inner.complete_hint()
-        } else {
-            String::new()
-        }
+        self.session
+            .lock()
+            .suggestion
+            .as_ref()
+            .map_or_else(String::new, |hint| hint.suffix.clone())
     }
 
     fn next_hint_token(&self) -> String {
-        if self.enabled {
-            self.inner.next_hint_token()
+        let shared = self.session.lock();
+        let Some(suggestion) = &shared.suggestion else {
+            return String::new();
+        };
+        let mut suffix = suggestion.suffix.clone();
+        let navigate_suggestions = shared.navigate_suggestions;
+        drop(shared);
+
+        let len = if navigate_suggestions {
+            forward_word_len(&suffix)
         } else {
-            String::new()
-        }
+            let trimmed = suffix.trim_start();
+            let word_len = trimmed.split_word_bounds().next().map_or(0, str::len);
+            suffix.len() - trimmed.len() + word_len
+        };
+        suffix.truncate(len);
+        suffix
     }
+}
+
+// Advance to the start of the next word, including the delimiters crossed.
+fn forward_word_len(suffix: &str) -> usize {
+    let after_word = suffix.trim_start_matches(char::is_alphanumeric);
+    let next_word = after_word.trim_start_matches(|ch: char| !ch.is_alphanumeric());
+    suffix.len() - next_word.len()
 }
 
 #[derive(Clone, Copy)]
@@ -201,6 +265,12 @@ struct HistorySearch {
     last: Buffer,
 }
 
+struct HistorySuggestion {
+    draft: String,
+    suffix: String,
+    id: i64,
+}
+
 fn history_matches<'a>(
     history: &'a history::History,
     prefix: &str,
@@ -231,6 +301,9 @@ fn history_matches<'a>(
 #[derive(Default)]
 pub(super) struct ReadlineSession {
     history: Option<HistorySearch>,
+    suggestion: Option<HistorySuggestion>,
+    suggestion_after_accept: Option<HistorySuggestion>,
+    navigate_suggestions: bool,
     cycle: Option<CompletionCycle>,
     last_completion: Option<Buffer>,
     options: ReadlineOptions,
@@ -245,11 +318,42 @@ impl ReadlineSession {
 
     pub(super) fn begin(&mut self, options: ReadlineOptions, utf8_locale: bool) {
         self.history = None;
+        self.suggestion = None;
+        self.suggestion_after_accept = None;
         self.cycle = None;
         self.last_completion = None;
         self.options = options;
         self.utf8_locale = utf8_locale;
         self.listing.cancel();
+    }
+
+    pub(super) fn remember_hint_acceptance(&mut self, event: &ReedlineEvent) {
+        if !self.navigate_suggestions {
+            return;
+        }
+        let Some(suggestion) = self
+            .suggestion
+            .as_ref()
+            .filter(|hint| !hint.suffix.is_empty())
+        else {
+            return;
+        };
+        let action = match event {
+            ReedlineEvent::UntilFound(actions) => actions.first(),
+            event => Some(event),
+        };
+        let len = match action {
+            Some(ReedlineEvent::HistoryHintComplete) => suggestion.suffix.len(),
+            Some(ReedlineEvent::HistoryHintWordComplete) => forward_word_len(&suggestion.suffix),
+            _ => return,
+        };
+        if let Some((accepted, remaining)) = suggestion.suffix.split_at_checked(len) {
+            self.suggestion_after_accept = Some(HistorySuggestion {
+                draft: suggestion.draft.clone() + accepted,
+                suffix: remaining.to_owned(),
+                id: suggestion.id,
+            });
+        }
     }
 
     pub(super) fn parse_event(
@@ -362,7 +466,52 @@ impl ReadlineSession {
         None
     }
 
+    pub(super) fn forward_word_event(&self, event: &ReedlineEvent) -> Option<ReedlineEvent> {
+        if self.navigate_suggestions
+            && let ReedlineEvent::Edit(commands) = event
+            && matches!(
+                commands.as_slice(),
+                [reedline::EditCommand::MoveWordRight { select: false }]
+            )
+        {
+            // An inputrc forward-word binding replaces the editor's default
+            // key binding, so give it the same chance to accept a suggestion.
+            return Some(ReedlineEvent::UntilFound(vec![
+                ReedlineEvent::HistoryHintWordComplete,
+                event.clone(),
+            ]));
+        }
+        None
+    }
+
     pub(super) fn history_event(&self, event: &ReedlineEvent) -> Option<ReedlineEvent> {
+        if self.navigate_suggestions
+            && self
+                .suggestion
+                .as_ref()
+                .is_some_and(|hint| !hint.suffix.is_empty())
+        {
+            match event {
+                ReedlineEvent::Up => return Some(Action::HistoryBackward.event()),
+                ReedlineEvent::Down => return Some(Action::HistoryForward.event()),
+                ReedlineEvent::UntilFound(events) => match events.as_slice() {
+                    [ReedlineEvent::MenuUp, ReedlineEvent::Up] => {
+                        return Some(ReedlineEvent::UntilFound(vec![
+                            ReedlineEvent::MenuUp,
+                            Action::HistoryBackward.event(),
+                        ]));
+                    }
+                    [ReedlineEvent::MenuDown, ReedlineEvent::Down] => {
+                        return Some(ReedlineEvent::UntilFound(vec![
+                            ReedlineEvent::MenuDown,
+                            Action::HistoryForward.event(),
+                        ]));
+                    }
+                    _ => {}
+                },
+                _ => {}
+            }
+        }
         if !self.options.history_preserve_point {
             return None;
         }
@@ -373,6 +522,41 @@ impl ReadlineSession {
             ReedlineEvent::Down | ReedlineEvent::NextHistory => Some(Action::NextHistory.event()),
             _ => None,
         }
+    }
+
+    fn browse_suggestion(
+        &mut self,
+        current: &Buffer,
+        history: &history::History,
+        action: Action,
+    ) -> bool {
+        let Some(suggestion) = self.suggestion.as_mut().filter(|suggestion| {
+            self.navigate_suggestions
+                && current.cursor == current.text.len()
+                && suggestion.draft == current.text
+                && !suggestion.suffix.is_empty()
+        }) else {
+            return false;
+        };
+        let backward = match action {
+            Action::HistoryBackward => true,
+            Action::HistoryForward => false,
+            _ => return false,
+        };
+        if let Some(mut entries) = history_matches(
+            history,
+            &suggestion.draft,
+            Some(suggestion.id),
+            backward,
+            self.options.search_ignore_case,
+        ) && let Some((id, suffix)) = entries.find_map(|entry| {
+            let suffix = entry.command_line.get(suggestion.draft.len()..)?;
+            (!suffix.is_empty() && suffix != suggestion.suffix).then_some((entry.id, suffix))
+        }) {
+            suggestion.id = id;
+            suggestion.suffix = suffix.to_owned();
+        }
+        true
     }
 
     fn search(
@@ -651,6 +835,9 @@ impl<SE: brush_core::ShellExtensions> reedline::Menu for ActionMenu<SE> {
                     | Action::PreviousHistory
                     | Action::NextHistory => {
                         let history = shell.history()?;
+                        if shared.browse_suggestion(&current, history, self.action) {
+                            return None;
+                        }
                         let next = shared.search(&current, history, self.action)?;
                         Some((next, reedline::UndoBehavior::HistoryNavigation))
                     }

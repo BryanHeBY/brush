@@ -765,6 +765,140 @@ fn readline_history_arrows_keep_suggestions_separate() -> anyhow::Result<()> {
 
 #[cfg(target_os = "linux")]
 #[test]
+fn history_suggestion_navigation_accepts_only_on_right() -> anyhow::Result<()> {
+    const FRAME_END: &str = "\x1b[?2026l";
+    const HINT: &str = "\x1b[2;3m";
+    let omarchy_keys = r#"
+"\e[A": history-search-backward
+"\e[B": history-search-forward
+"\e[C": "\C-f"
+TAB: menu-complete
+"#;
+    for inputrc in [omarchy_keys, "TAB: menu-complete\n"] {
+        for_readline_shell_with_config(
+            inputrc,
+            Some("[ui]\nsyntax-highlighting = true\nhistory-suggestion-navigation = true\n"),
+            |shell| {
+                if shell.bash {
+                    return Ok(());
+                }
+                shell.run_and_expect("echo draft-older", "draft-older")?;
+                shell.run_and_expect("echo draft-older-tail", "draft-older-tail")?;
+                shell.run_and_expect("echo draft-newer", "draft-newer")?;
+                shell.expect(FRAME_END)?;
+
+                shell.session.send("echo dr")?;
+                shell.expect(&format!("{HINT}aft-newer"))?;
+                shell.expect(FRAME_END)?;
+                for (key, suffix) in [("\x1b[A", "aft-older-tail"), ("\x1b[B", "aft-newer")] {
+                    shell.session.send(key)?;
+                    let frame = shell.capture(FRAME_END)?;
+                    assert!(frame.contains(&format!("{HINT}{suffix}")), "{frame:?}");
+                }
+                shell.run_and_expect("", "dr")?;
+                shell.expect(FRAME_END)?;
+
+                shell.session.send("echo dra\x1b[A\x1b[A")?;
+                shell.expect(&format!("{HINT}ft-older\x1b[0m"))?;
+                shell.expect(FRAME_END)?;
+                shell.session.send("\x1b[C")?;
+                let frame = shell.capture(FRAME_END)?;
+                assert!(frame.contains("draft-older"), "{frame:?}");
+                assert!(!frame.contains("-tail"), "{frame:?}");
+                shell.run_and_expect("", "draft-older")?;
+                shell.expect(FRAME_END)?;
+
+                // With an empty draft, Up still recalls and submits a history entry.
+                shell.run_and_expect("\x1b[A", "draft-older")?;
+
+                shell.command(": > uniquely-matching")?;
+                shell.run_and_expect("echo uniquely-m\t", "uniquely-matching")
+            },
+        )?;
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn history_suggestions_accept_and_highlight_through_the_next_word_boundary() -> anyhow::Result<()> {
+    const FRAME_END: &str = "\x1b[?2026l";
+    for_readline_shell_with_config(
+        r#"
+"\e[A": history-search-backward
+"\e[C": "\C-f"
+"#,
+        Some("[ui]\nsyntax-highlighting = true\nhistory-suggestion-navigation = true\n"),
+        |shell| {
+            if shell.bash {
+                return Ok(());
+            }
+            shell.run_and_expect("echo 'alpha beta' /tmp/older", "alpha beta /tmp/older")?;
+            shell.run_and_expect("echo 'alpha beta' /tmp/newer", "alpha beta /tmp/newer")?;
+            shell.expect(FRAME_END)?;
+
+            shell.session.send("echo\x1b[A")?;
+            shell.expect("\x1b[2;3m 'alpha beta' /tmp/older")?;
+            shell.expect(FRAME_END)?;
+
+            for (quoted, remaining) in [
+                ("'", "alpha beta' /tmp/older"),
+                ("'alpha ", "beta' /tmp/older"),
+                ("'alpha beta'", "tmp/older"),
+            ] {
+                shell.session.send("\x1b[1;5C")?;
+                let frame = shell.capture(FRAME_END)?;
+                assert!(frame.contains("\x1b[1;32mecho\x1b[0m"), "{frame:?}");
+                assert!(
+                    frame.contains(&format!("\x1b[33m{quoted}\x1b[0m")),
+                    "{frame:?}"
+                );
+                assert!(
+                    frame.contains(&format!("\x1b[2;3m{remaining}\x1b[0m")),
+                    "{frame:?}"
+                );
+            }
+
+            shell.run_and_expect("\x1b[C", "alpha beta /tmp/older")?;
+            shell.run_and_expect("echo sample\x01\x1b[1;5C\x1b[1;2CX", "Xample")
+        },
+    )
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn forward_word_binding_partially_accepts_a_visible_suggestion() -> anyhow::Result<()> {
+    const FRAME_END: &str = "\x1b[?2026l";
+    for_readline_shell_with_config(
+        r#"
+$if mode=emacs
+"\e[1;5C": forward-word
+$endif
+"#,
+        Some("[ui]\nsyntax-highlighting = true\nhistory-suggestion-navigation = true\n"),
+        |shell| {
+            if shell.bash {
+                return Ok(());
+            }
+            shell.run_and_expect("echo target alpha", "target alpha")?;
+            shell.expect(FRAME_END)?;
+
+            shell.session.send("echo tar")?;
+            shell.expect("\x1b[2;3mget alpha")?;
+            shell.expect(FRAME_END)?;
+            shell.session.send("\x1b[1;5C")?;
+            shell.expect("\x1b[2;3malpha")?;
+            shell.expect(FRAME_END)?;
+            shell.run_and_expect("", "target")?;
+
+            // An ordinary forward-word binding still moves through typed text.
+            shell.run_and_expect("echo one two\x01\x1b[1;5C X", "X one two")
+        },
+    )
+}
+
+#[cfg(target_os = "linux")]
+#[test]
 fn readline_terminal_special_keys_match_bash() -> anyhow::Result<()> {
     for (setting, result) in [("on", "A"), ("off", "BA")] {
         for_readline_shell(

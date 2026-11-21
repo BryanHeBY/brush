@@ -10,6 +10,9 @@ pub struct UIOptions {
     /// Whether to disable syntax highlighting.
     #[builder(default)]
     pub disable_highlighting: bool,
+    /// Whether Up and Down browse visible history suggestions before inserting them.
+    #[builder(default)]
+    pub history_suggestion_navigation: bool,
     /// Whether to enable terminal integration.
     #[builder(default)]
     pub terminal_shell_integration: bool,
