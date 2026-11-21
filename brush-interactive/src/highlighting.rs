@@ -164,10 +164,11 @@ impl<'a, SE: brush_core::ShellExtensions> Highlighter<'a, SE> {
     }
 
     fn highlight_program(&mut self, line: &str, global_offset: usize) {
-        if let Ok(tokens) = brush_parser::tokenize_str_with_options(
+        let tokens = brush_parser::tokenize_str_with_options(
             line,
             &(self.shell.parser_options().tokenizer_options()),
-        ) {
+        );
+        if let Ok(tokens) = tokens {
             let mut saw_command_token = false;
 
             for token in tokens {
@@ -212,7 +213,29 @@ impl<'a, SE: brush_core::ShellExtensions> Highlighter<'a, SE> {
             }
 
             self.skip_ahead(global_offset + line.len());
-        } else {
+        } else if let Err(error) = tokens {
+            use brush_parser::TokenizerError;
+
+            // An unfinished quote can be the next part of a partially accepted
+            // suggestion. The complete tokens before it can still be styled.
+            let quote_start = match error {
+                TokenizerError::UnterminatedSingleQuote(position)
+                | TokenizerError::UnterminatedDoubleQuote(position) => Some(position.byte_offset),
+                TokenizerError::UnterminatedAnsiCQuote(position) => {
+                    position.byte_offset.checked_sub(1)
+                }
+                _ => None,
+            };
+            if let Some(start) = quote_start.filter(|&start| start < line.len())
+                && let Some(prefix) = line.get(..start)
+            {
+                self.highlight_program(prefix, global_offset);
+                self.append_span(
+                    HighlightKind::Quoted,
+                    global_offset + start..global_offset + line.len(),
+                );
+                return;
+            }
             self.append_span(
                 HighlightKind::Default,
                 global_offset..global_offset + line.len(),
@@ -363,26 +386,21 @@ impl<'a, SE: brush_core::ShellExtensions> Highlighter<'a, SE> {
             return CommandType::Builtin;
         }
 
-        // Short-circuit if the cursor is still in this token (inclusive of its end, so a
-        // command still being typed isn't prematurely flagged as not-found).
-        if self.cursor >= token_range.start && self.cursor <= token_range.end {
-            return CommandType::Unknown;
-        }
-
-        if brush_core::sys::fs::contains_path_separator(name) {
+        let exists = if brush_core::sys::fs::contains_path_separator(name) {
             // TODO(highlighting): Should check for executable-ness.
-            let candidate_path = self.shell.absolute_path(std::path::Path::new(name));
-            if candidate_path.exists() {
-                CommandType::External
-            } else {
-                CommandType::NotFound
-            }
+            self.shell
+                .absolute_path(std::path::Path::new(name))
+                .exists()
         } else {
-            if self.shell.find_first_executable_in_path(name).is_some() {
-                CommandType::External
-            } else {
-                CommandType::NotFound
-            }
+            self.shell.find_first_executable_in_path(name).is_some()
+        };
+        if exists {
+            CommandType::External
+        } else if self.cursor >= token_range.start && self.cursor <= token_range.end {
+            // A command still being typed may become valid when it is complete.
+            CommandType::Unknown
+        } else {
+            CommandType::NotFound
         }
     }
 }
@@ -429,6 +447,24 @@ mod tests {
                 .iter()
                 .any(|s| s.kind == HighlightKind::Quoted)
         );
+    }
+
+    #[tokio::test]
+    async fn unfinished_quotes_preserve_highlighting_for_the_typed_prefix() {
+        let shell = brush_core::Shell::builder().build().await.unwrap();
+        for quote in ["'example", "\"example", "$'example"] {
+            let line = format!("if true; then echo {quote}");
+            let highlighted = highlight_command(&shell, &line, line.len());
+            assert!(
+                highlighted
+                    .iter()
+                    .any(|span| span == (HighlightKind::Keyword, "if"))
+            );
+            assert_eq!(
+                highlighted.iter().last(),
+                Some((HighlightKind::Quoted, quote))
+            );
+        }
     }
 
     #[tokio::test]
