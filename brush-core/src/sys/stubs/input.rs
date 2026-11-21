@@ -14,3 +14,29 @@ pub fn try_get_key_from_key_code(key_code: &[u8]) -> Option<interfaces::Key> {
         None
     }
 }
+
+/// Returns empty terminal mode sequences on platforms without terminfo.
+pub fn readline_terminal_modes(_keypad: bool, _meta: bool) -> (Vec<u8>, Vec<u8>) {
+    (Vec::new(), Vec::new())
+}
+
+/// Returns no terminal editing character overrides on this platform.
+pub fn readline_terminal_keys() -> Vec<(u8, Option<interfaces::InputFunction>)> {
+    Vec::new()
+}
+
+/// Returns an unsupported error on platforms without a byte-oriented terminal.
+pub fn read_stdin_bytes(_buffer: &mut [u8]) -> std::io::Result<usize> {
+    Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
+}
+
+/// Returns ANSI reverse video and its matching reset for this platform.
+pub fn readline_terminal_standout() -> (String, String) {
+    ("\x1b[7m".to_owned(), "\x1b[27m".to_owned())
+}
+
+/// Requests the audible bell on platforms without a terminal flash capability.
+pub fn flash_readline_terminal(output: &mut impl std::io::Write) -> std::io::Result<()> {
+    output.write_all(b"\x07")?;
+    output.flush()
+}

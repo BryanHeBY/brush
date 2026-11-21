@@ -52,3 +52,6 @@ pub use minimal::MinimalInputBackend;
 pub mod vt;
 #[cfg(feature = "vt")]
 pub use vt::VtInputBackend;
+
+#[cfg(any(feature = "vt", reedline_backend))]
+mod terminal_keys;

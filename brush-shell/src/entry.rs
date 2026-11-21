@@ -452,7 +452,12 @@ async fn initialize_shell(
         brush_core::RcLoadBehavior::LoadDefault
     };
 
-    shell_ref.lock().await.load_config(&profile, &rc).await?;
+    let mut shell = shell_ref.lock().await;
+    if shell.options().interactive && !args.no_editing && args.will_read_commands_from_stdin() {
+        brush_builtins::load_default_inputrc(&mut *shell).await;
+    }
+    shell.load_config(&profile, &rc).await?;
+    drop(shell);
 
     Ok(())
 }

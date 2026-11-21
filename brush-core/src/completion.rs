@@ -1312,7 +1312,12 @@ async fn get_file_completions(
     // path separator.
     let expanded_token = sys::fs::normalize_path_separators(&expanded_token).into_owned();
 
-    let glob = std::format!("{expanded_token}*");
+    let readline = shell.readline_options();
+    let glob = if readline.completion_ignore_case && readline.completion_map_case {
+        completion_case_map(&expanded_token)
+    } else {
+        std::format!("{expanded_token}*")
+    };
 
     let path_filter = |path: &Path| !must_be_dir || shell.absolute_path(path).is_dir();
 
@@ -1322,7 +1327,11 @@ async fn get_file_completions(
         .expand(
             shell.working_dir(),
             Some(&path_filter),
-            &patterns::FilenameExpansionOptions::default(),
+            &patterns::FilenameExpansionOptions {
+                require_dot_in_pattern_to_match_dot_files: !shell
+                    .readline_options()
+                    .match_hidden_files,
+            },
         )
         .unwrap_or_default()
         .into_paths()
@@ -1347,6 +1356,29 @@ async fn get_file_completions(
     completions.sort();
     completions.dedup();
     completions
+}
+
+fn completion_case_map(prefix: &str) -> String {
+    let mut result = String::with_capacity(prefix.len() + 1);
+    let mut bracket = false;
+    let mut escaped = false;
+    for c in prefix.chars() {
+        match c {
+            '-' | '_' if !bracket && !escaped => result.push_str("[-_]"),
+            '[' if !escaped => {
+                bracket = true;
+                result.push(c);
+            }
+            ']' if !escaped => {
+                bracket = false;
+                result.push(c);
+            }
+            _ => result.push(c),
+        }
+        escaped = c == '\\' && !escaped;
+    }
+    result.push('*');
+    result
 }
 
 /// Attempts to complete a variable name from the given token.
@@ -1432,7 +1464,8 @@ fn command_completions(
         shell
             .find_executables_in_path_with_prefix(
                 prefix,
-                shell.options().case_insensitive_pathname_expansion,
+                shell.options().case_insensitive_pathname_expansion
+                    || shell.readline_options().completion_ignore_case,
             )
             .filter_map(|path| Some(path.file_name()?.to_string_lossy().into_owned())),
     );
@@ -1534,7 +1567,10 @@ fn shell_pattern(
     pattern
         .into()
         .set_extended_globbing(shell.options().extended_globbing)
-        .set_case_insensitive(shell.options().case_insensitive_pathname_expansion)
+        .set_case_insensitive(
+            shell.options().case_insensitive_pathname_expansion
+                || shell.readline_options().completion_ignore_case,
+        )
 }
 
 #[cfg(test)]

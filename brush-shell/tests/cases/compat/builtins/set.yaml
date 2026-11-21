@@ -376,7 +376,6 @@ cases:
       set +o +o errexit >/dev/null; echo "status: $?"; opts; set +e
 
   - name: "set -o vi and -o emacs turn each other off"
-    known_failure: true # TODO(set): brush leaves both on
     stdin: |
       set -o vi -o emacs; set -o | grep -E '^(vi|emacs) '
       set -o emacs -o vi; set -o | grep -E '^(vi|emacs) '

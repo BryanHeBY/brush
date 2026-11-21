@@ -1,10 +1,19 @@
 use brush_core::{
-    interfaces::{self, InputFunction, Key, KeyAction, KeyBindings as _, KeySequence, KeyStroke},
+    interfaces::{self, InputFunction, Key, KeyAction, KeySequence, KeyStroke},
     trace_categories,
 };
-use radix_trie::Trie;
-use std::{collections::HashMap, sync::Arc};
+use radix_trie::{Trie, TrieCommon as _};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 use tokio::sync::Mutex;
+
+use super::readline::{Action, Session};
+
+mod keyboard_macro;
+mod keymaps;
+pub(super) use keymaps::BindingMaps;
 
 #[derive(thiserror::Error, Debug)]
 pub enum KeyError {
@@ -18,17 +27,19 @@ pub enum KeyError {
 }
 
 pub(crate) struct MutableEditMode {
-    inner: Arc<Mutex<UpdatableBindings>>,
+    inner: Arc<Mutex<BindingMaps>>,
+    readline: Session,
 }
 
 impl MutableEditMode {
-    pub fn new(bindings: reedline::Keybindings) -> Self {
+    pub fn new(bindings: reedline::Keybindings, readline: Session) -> Self {
         Self {
-            inner: Arc::new(Mutex::new(UpdatableBindings::new(bindings))),
+            inner: Arc::new(Mutex::new(BindingMaps::new(bindings))),
+            readline,
         }
     }
 
-    pub fn bindings(&self) -> Arc<Mutex<UpdatableBindings>> {
+    pub fn bindings(&self) -> Arc<Mutex<BindingMaps>> {
         self.inner.clone()
     }
 }
@@ -39,7 +50,37 @@ impl reedline::EditMode for MutableEditMode {
             tokio::runtime::Handle::current().block_on(self.inner.lock())
         });
 
-        inner.parse_event(event)
+        let mut readline = self.readline.lock();
+        let event = readline.parse_event(event.into(), |event| {
+            event
+                .try_into()
+                .ok()
+                .map_or(reedline::ReedlineEvent::None, |event| {
+                    inner.parse_event(event)
+                })
+        });
+        if let Some(output) = inner.take_macro_output() {
+            readline.print_message(output);
+        }
+        if inner.take_macro_bell() {
+            readline.bell();
+        }
+        drop(inner);
+        let default_tab = matches!(&event, reedline::ReedlineEvent::UntilFound(actions)
+            if matches!(actions.first(), Some(reedline::ReedlineEvent::Menu(name)) if name == super::input_backend::COMPLETION_MENU_NAME));
+        readline
+            .completion_event(&event, default_tab)
+            .or_else(|| readline.comment_event(&event))
+            .or_else(|| readline.history_event(&event))
+            .unwrap_or(event)
+    }
+
+    fn next_replay_event(&mut self) -> Option<reedline::ReedlineRawEvent> {
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current()
+                .block_on(self.inner.lock())
+                .next_replay_event()
+        })
     }
 
     fn edit_mode(&self) -> reedline::PromptEditMode {
@@ -49,16 +90,28 @@ impl reedline::EditMode for MutableEditMode {
 
         inner.edit_mode()
     }
+
+    fn handle_mode_specific_event(
+        &mut self,
+        event: reedline::ReedlineEvent,
+    ) -> reedline::EventStatus {
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current()
+                .block_on(self.inner.lock())
+                .handle_mode_specific_event(event)
+        })
+    }
 }
 
 pub(crate) struct UpdatableBindings {
     bindings: reedline::Keybindings,
     edit_mode: Box<dyn reedline::EditMode>,
-    /// Trie for raw byte sequences. Supports both exact lookups and prefix matching
-    /// during macro resolution.
+    /// Bindings whose terminal bytes have no portable key representation.
     raw_mappings: Trie<Vec<u8>, interfaces::KeyAction>,
     /// Tracks defined macros.
     macros: HashMap<interfaces::KeySequence, interfaces::KeySequence>,
+    sequences: HashMap<Vec<KeyStroke>, KeyAction>,
+    configured: HashSet<KeySequence>,
 }
 
 impl UpdatableBindings {
@@ -71,12 +124,13 @@ impl UpdatableBindings {
             edit_mode,
             raw_mappings: Trie::new(),
             macros: HashMap::new(),
+            sequences: HashMap::new(),
+            configured: HashSet::new(),
         }
     }
 
     pub fn update(&mut self, f: impl Fn(&mut reedline::Keybindings)) {
         f(&mut self.bindings);
-        self.try_update_bindings_for_all_macros();
         self.edit_mode = Self::rebuild_edit_mode(&self.bindings);
     }
 
@@ -129,6 +183,16 @@ impl interfaces::KeyBindings for UpdatableBindings {
                 }
             }
         }
+        results.extend(
+            self.raw_mappings
+                .iter()
+                .map(|(bytes, action)| (KeySequence::Bytes(vec![bytes.clone()]), action.clone())),
+        );
+        results.extend(
+            self.sequences
+                .iter()
+                .map(|(keys, action)| (KeySequence::Strokes(keys.clone()), action.clone())),
+        );
 
         results
     }
@@ -138,11 +202,56 @@ impl interfaces::KeyBindings for UpdatableBindings {
     }
 
     fn bind(&mut self, seq: KeySequence, action: KeyAction) -> Result<(), std::io::Error> {
-        self.do_bind(seq, action, true)
+        let Some(event) = translate_action_to_reedline_event(&action) else {
+            return Err(std::io::Error::other(KeyError::UnsupportedKeyAction(
+                action,
+            )));
+        };
+        match &seq {
+            KeySequence::Strokes(strokes) => {
+                if let Some((modifiers, key_code)) = translate_key_sequence_to_reedline(&seq) {
+                    self.update(|bindings| {
+                        bindings.add_binding(modifiers, key_code, event.clone());
+                    });
+                } else if strokes.len() > 1 {
+                    self.sequences.insert(strokes.clone(), action);
+                } else {
+                    return Err(std::io::Error::other(KeyError::UnsupportedKeySequence(seq)));
+                }
+            }
+            KeySequence::Bytes(bytes) => {
+                self.raw_mappings
+                    .insert(bytes.iter().flatten().copied().collect(), action);
+            }
+        }
+        self.macros.remove(&seq);
+        self.configured.insert(seq);
+        Ok(())
     }
 
     fn try_unbind(&mut self, seq: KeySequence) -> bool {
-        self.try_unbind_impl(&seq, true)
+        self.configured.insert(seq.clone());
+        let removed_macro = self.macros.remove(&seq).is_some();
+        let removed_binding = match &seq {
+            KeySequence::Strokes(strokes) => {
+                if let Some((modifiers, key_code)) = translate_key_sequence_to_reedline(&seq) {
+                    let found = self.bindings.find_binding(modifiers, key_code).is_some();
+                    if found {
+                        self.update(|bindings| {
+                            bindings.remove_binding(modifiers, key_code);
+                        });
+                    }
+                    found
+                } else {
+                    self.sequences.remove(strokes).is_some()
+                }
+            }
+            KeySequence::Bytes(bytes) => {
+                let flat_bytes = bytes.iter().flatten().copied().collect::<Vec<_>>();
+                self.raw_mappings.remove(&flat_bytes).is_some()
+            }
+        };
+        removed_macro || removed_binding
     }
 
     fn define_macro(
@@ -150,193 +259,13 @@ impl interfaces::KeyBindings for UpdatableBindings {
         seq: KeySequence,
         target: KeySequence,
     ) -> Result<(), std::io::Error> {
+        self.try_unbind(seq.clone());
         self.macros.insert(seq, target);
-        self.update(|_| {});
-
         Ok(())
     }
 
     fn get_macros(&self) -> HashMap<KeySequence, KeySequence> {
         self.macros.clone()
-    }
-}
-
-impl UpdatableBindings {
-    /// Internal implementation that optionally removes from the macros map.
-    /// When updating bindings for macros, we don't want to remove the macro definition itself.
-    fn try_unbind_impl(&mut self, seq: &KeySequence, remove_from_macros: bool) -> bool {
-        // Optionally remove from macros.
-        let removed_macro = if remove_from_macros {
-            self.macros.remove(seq).is_some()
-        } else {
-            false
-        };
-
-        match seq {
-            interfaces::KeySequence::Strokes(_) => {
-                if let Some((modifiers, key_code)) = translate_key_sequence_to_reedline(seq) {
-                    let found = self.bindings.find_binding(modifiers, key_code).is_some();
-
-                    if found {
-                        self.update(|bindings| {
-                            let _ = bindings.remove_binding(modifiers, key_code);
-                        });
-                    }
-
-                    found || removed_macro
-                } else {
-                    removed_macro
-                }
-            }
-            interfaces::KeySequence::Bytes(bytes) => {
-                let flat_bytes: Vec<u8> = bytes.iter().flatten().copied().collect();
-                let removed_raw = self.raw_mappings.remove(&flat_bytes).is_some();
-
-                removed_raw || removed_macro
-            }
-        }
-    }
-
-    fn do_bind(
-        &mut self,
-        seq: KeySequence,
-        action: KeyAction,
-        rebuild_for_reedline: bool,
-    ) -> Result<(), std::io::Error> {
-        let Some(event) = translate_action_to_reedline_event(&action) else {
-            return Err(std::io::Error::other(KeyError::UnsupportedKeyAction(
-                action,
-            )));
-        };
-
-        match seq {
-            interfaces::KeySequence::Strokes(_) => {
-                if let Some((modifiers, key_code)) = translate_key_sequence_to_reedline(&seq) {
-                    if rebuild_for_reedline {
-                        self.update(|bindings| {
-                            bindings.add_binding(modifiers, key_code, event.clone());
-                        });
-                    } else {
-                        self.bindings
-                            .add_binding(modifiers, key_code, event.clone());
-                    }
-
-                    Ok(())
-                } else {
-                    Err(std::io::Error::other(KeyError::UnsupportedKeySequence(seq)))
-                }
-            }
-            interfaces::KeySequence::Bytes(ref bytes) => {
-                let flat_bytes: Vec<u8> = bytes.iter().flatten().copied().collect();
-                self.raw_mappings.insert(flat_bytes, action);
-
-                Ok(())
-            }
-        }
-    }
-
-    fn try_update_bindings_for_all_macros(&mut self) {
-        let macros = self.macros.clone();
-        for (seq, target) in macros {
-            let _ = self.update_bindings_for_macro(seq, target);
-        }
-    }
-
-    fn update_bindings_for_macro(
-        &mut self,
-        seq: KeySequence,
-        target: KeySequence,
-    ) -> Result<(), std::io::Error> {
-        match target {
-            // TODO(input): We acknowledge that this implementation eagerly resolves the macro
-            // and what it will do. Subsequent changes to other key binding might invalidate
-            // this. We also are *extremely* limited in what we support here.
-            interfaces::KeySequence::Strokes(key_strokes) => {
-                if key_strokes.is_empty() {
-                    // Empty macro target - unbind any existing binding for this sequence.
-                    self.try_unbind(seq);
-                } else {
-                    return Err(std::io::Error::other(
-                        "binding key sequence to readline macro with strokes",
-                    ));
-                }
-            }
-            interfaces::KeySequence::Bytes(items) => {
-                // Flatten all byte sequences into one contiguous buffer for prefix matching.
-                let flat_bytes: Vec<u8> = items.iter().flatten().copied().collect();
-                let actions = self.resolve_macro_body(&flat_bytes);
-
-                if actions.is_empty() {
-                    // No actions resolved - unbind any existing key binding for this sequence,
-                    // but keep the macro definition so it shows up in `bind -s/-S`.
-                    self.try_unbind_impl(&seq, false);
-                    return Ok(());
-                }
-
-                // Create a single action: either the action itself (if just one), or a Sequence.
-                let action = if let [single] = actions.as_slice() {
-                    single.clone()
-                } else {
-                    KeyAction::Sequence(actions)
-                };
-
-                self.do_bind(seq, action, false)?;
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Resolve a macro body (byte sequence) into a sequence of actions using prefix matching.
-    /// Returns a flattened vector of actions (any nested Sequences are expanded).
-    fn resolve_macro_body(&self, bytes: &[u8]) -> Vec<KeyAction> {
-        let mut actions = Vec::new();
-        let mut remaining = bytes;
-
-        while !remaining.is_empty() {
-            // Find the longest prefix match in the trie.
-            if let Some((matched_key, action)) = self.find_longest_prefix_match(remaining) {
-                // Flatten any nested Sequence actions.
-                Self::flatten_action_into(&mut actions, action.clone());
-                remaining = &remaining[matched_key.len()..];
-            } else {
-                // No match found - skip one byte and continue.
-                // This handles unbound byte sequences gracefully.
-                tracing::debug!(
-                    target: trace_categories::INPUT,
-                    "skipping unbound byte in macro resolution: 0x{:02x}",
-                    remaining[0]
-                );
-                remaining = &remaining[1..];
-            }
-        }
-
-        actions
-    }
-
-    /// Find the longest prefix match in the trie for the given bytes.
-    /// Uses the trie's native `get_ancestor` method which efficiently finds
-    /// the longest matching prefix.
-    fn find_longest_prefix_match(&self, bytes: &[u8]) -> Option<(Vec<u8>, &KeyAction)> {
-        use radix_trie::TrieCommon;
-
-        self.raw_mappings.get_ancestor(bytes).and_then(|subtrie| {
-            let key = subtrie.key()?.clone();
-            let value = subtrie.value()?;
-            Some((key, value))
-        })
-    }
-
-    /// Flatten an action into the actions vector, expanding any Sequence variants.
-    fn flatten_action_into(actions: &mut Vec<KeyAction>, action: KeyAction) {
-        match action {
-            KeyAction::Sequence(inner_actions) => {
-                for inner in inner_actions {
-                    Self::flatten_action_into(actions, inner);
-                }
-            }
-            other => actions.push(other),
-        }
     }
 }
 
@@ -353,10 +282,19 @@ fn translate_key_sequence_to_reedline(
         return None;
     };
 
+    Some(translate_key_stroke(stroke))
+}
+
+pub(super) fn translate_key_stroke(
+    stroke: &KeyStroke,
+) -> (reedline::KeyModifiers, reedline::KeyCode) {
     let mut modifiers = reedline::KeyModifiers::empty();
     modifiers.set(reedline::KeyModifiers::ALT, stroke.alt);
     modifiers.set(reedline::KeyModifiers::CONTROL, stroke.control);
-    modifiers.set(reedline::KeyModifiers::SHIFT, stroke.shift);
+    modifiers.set(
+        reedline::KeyModifiers::SHIFT,
+        stroke.shift || stroke.key == Key::BackTab,
+    );
 
     let key_code = match stroke.key {
         Key::Character(c) => reedline::KeyCode::Char(c),
@@ -378,7 +316,7 @@ fn translate_key_sequence_to_reedline(
         Key::Escape => reedline::KeyCode::Esc,
     };
 
-    Some((modifiers, key_code))
+    (modifiers, key_code)
 }
 
 fn translate_action_to_reedline_event(action: &KeyAction) -> Option<reedline::ReedlineEvent> {
@@ -410,6 +348,12 @@ fn translate_input_function_to_reedline_event(
 ) -> Option<reedline::ReedlineEvent> {
     use reedline::{EditCommand, ReedlineEvent};
 
+    if let Some(command) = keyboard_macro::Command::for_function(func) {
+        return Some(ReedlineEvent::ExecuteHostCommand(command.marker().into()));
+    }
+    if let Some(action) = Action::for_function(func) {
+        return Some(action.event());
+    }
     match func {
         InputFunction::BackwardDeleteChar => {
             Some(ReedlineEvent::Edit(vec![EditCommand::Backspace]))
@@ -417,6 +361,12 @@ fn translate_input_function_to_reedline_event(
         InputFunction::BackwardKillWord => {
             Some(ReedlineEvent::Edit(vec![EditCommand::CutWordLeft]))
         }
+        InputFunction::UnixWordRubout => {
+            Some(ReedlineEvent::Edit(vec![EditCommand::CutBigWordLeft]))
+        }
+        InputFunction::QuotedInsert => Some(ReedlineEvent::ExecuteHostCommand(
+            keymaps::QUOTED_INSERT.into(),
+        )),
         InputFunction::KillLine => Some(ReedlineEvent::Edit(vec![EditCommand::KillLine])),
         InputFunction::KillWholeLine => Some(ReedlineEvent::Edit(vec![EditCommand::CutFromStart])),
         InputFunction::KillWord => Some(ReedlineEvent::Edit(vec![EditCommand::CutWordRight])),
@@ -451,9 +401,28 @@ fn translate_input_function_to_reedline_event(
         InputFunction::Undo => Some(ReedlineEvent::Edit(vec![EditCommand::Undo])),
         InputFunction::ClearScreen => Some(ReedlineEvent::ClearScreen),
         InputFunction::AcceptLine => Some(ReedlineEvent::Enter),
-        InputFunction::HistorySearchBackward => Some(ReedlineEvent::SearchHistory),
+        InputFunction::ReReadInitFile => Some(ReedlineEvent::ExecuteHostCommand(
+            super::input_backend::RELOAD_INPUTRC.into(),
+        )),
+        InputFunction::Abort => Some(ReedlineEvent::Esc),
+        InputFunction::TabInsert => Some(ReedlineEvent::Edit(vec![EditCommand::InsertChar('\t')])),
+        InputFunction::PreviousHistory => Some(ReedlineEvent::PreviousHistory),
+        InputFunction::NextHistory => Some(ReedlineEvent::NextHistory),
+        InputFunction::BeginningOfHistory => Some(ReedlineEvent::FirstHistory),
+        InputFunction::EndOfHistory => Some(ReedlineEvent::LeaveHistory),
+        InputFunction::PreviousScreenLine => Some(ReedlineEvent::Up),
+        InputFunction::NextScreenLine => Some(ReedlineEvent::Down),
+        InputFunction::BackwardKillLine | InputFunction::UnixLineDiscard => {
+            Some(ReedlineEvent::Edit(vec![EditCommand::CutFromLineStart]))
+        }
+        InputFunction::ViEditingMode => Some(ReedlineEvent::SwitchMode(
+            reedline::PromptEditMode::Vi(reedline::PromptViMode::Insert),
+        )),
+        InputFunction::EmacsEditingMode => {
+            Some(ReedlineEvent::SwitchMode(reedline::PromptEditMode::Emacs))
+        }
+        InputFunction::ReverseSearchHistory => Some(ReedlineEvent::SearchHistory),
         InputFunction::RedrawCurrentLine => Some(ReedlineEvent::Repaint),
-        InputFunction::Complete => Some(ReedlineEvent::Edit(vec![EditCommand::Complete])),
         InputFunction::BrushAcceptHint => Some(ReedlineEvent::HistoryHintComplete),
         InputFunction::BrushAcceptHintWord => Some(ReedlineEvent::HistoryHintWordComplete),
         _ => None,
@@ -494,6 +463,13 @@ const fn translate_reedline_keycode(keycode: reedline::KeyCode) -> Option<Key> {
 
 #[expect(clippy::too_many_lines)]
 fn translate_reedline_event_to_action(event: &reedline::ReedlineEvent) -> Option<KeyAction> {
+    if matches!(event, reedline::ReedlineEvent::ExecuteHostCommand(marker) if marker == keymaps::QUOTED_INSERT)
+    {
+        return Some(KeyAction::DoInputFunction(InputFunction::QuotedInsert));
+    }
+    if let Some(command) = keyboard_macro::Command::from_event(event) {
+        return Some(KeyAction::DoInputFunction(command.function()));
+    }
     match event {
         reedline::ReedlineEvent::Edit(cmds) => {
             match cmds.as_slice() {
@@ -617,7 +593,7 @@ fn translate_reedline_event_to_action(event: &reedline::ReedlineEvent) -> Option
             Some(KeyAction::DoInputFunction(InputFunction::NextScreenLine))
         }
         reedline::ReedlineEvent::SearchHistory => Some(KeyAction::DoInputFunction(
-            InputFunction::HistorySearchBackward,
+            InputFunction::ReverseSearchHistory,
         )),
         reedline::ReedlineEvent::Repaint => {
             Some(KeyAction::DoInputFunction(InputFunction::RedrawCurrentLine))
@@ -629,6 +605,9 @@ fn translate_reedline_event_to_action(event: &reedline::ReedlineEvent) -> Option
             InputFunction::BrushAcceptHintWord,
         )),
         reedline::ReedlineEvent::Multiple(evts) => {
+            if let Some(function) = Action::from_events(evts) {
+                return Some(KeyAction::DoInputFunction(function));
+            }
             if let &[
                 reedline::ReedlineEvent::Edit(ref edit_cmds),
                 reedline::ReedlineEvent::Enter,
@@ -684,7 +663,11 @@ fn translate_reedline_event_to_action(event: &reedline::ReedlineEvent) -> Option
             }
         }
         reedline::ReedlineEvent::ExecuteHostCommand(cmd) => {
-            Some(KeyAction::ShellCommand(cmd.to_owned()))
+            Some(if cmd == super::input_backend::RELOAD_INPUTRC {
+                KeyAction::DoInputFunction(InputFunction::ReReadInitFile)
+            } else {
+                KeyAction::ShellCommand(cmd.to_owned())
+            })
         }
         evt => {
             // TODO(input): Handle more?

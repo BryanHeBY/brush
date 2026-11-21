@@ -46,6 +46,7 @@ mod traps;
 
 pub use builder::{CreateOptions, ShellBuilder, ShellBuilderState};
 pub use initscripts::{ProfileLoadBehavior, RcLoadBehavior};
+pub use readline::{ReadlineBellStyle, ReadlineOptions};
 pub use state::ShellState;
 
 /// Represents an instance of a shell.
@@ -138,6 +139,10 @@ pub struct Shell<SE: extensions::ShellExtensions = extensions::DefaultShellExten
     /// Programmable completion state.
     completion: crate::completion::State,
 
+    /// Settings for readline-compatible input and completion.
+    #[cfg_attr(feature = "serde", serde(default))]
+    readline_options: ReadlineOptions,
+
     /// Shell built-in commands.
     #[cfg_attr(feature = "serde", serde(skip))]
     builtins: builtins::Registry<SE>,
@@ -198,6 +203,7 @@ impl<SE: extensions::ShellExtensions> Clone for Shell<SE> {
             // completion too. Like a forked subshell in bash, it changes only its own copy
             // (e.g. with `compopt`), which its parent doesn't see.
             completion: self.completion.clone(),
+            readline_options: self.readline_options.clone(),
             builtins: self.builtins.clone(),
             program_location_cache: self.program_location_cache.clone(),
             last_stopwatch_time: self.last_stopwatch_time,

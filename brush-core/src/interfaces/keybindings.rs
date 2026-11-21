@@ -383,8 +383,62 @@ impl Display for Key {
     }
 }
 
+/// Named key tables used by Readline-compatible configuration.
+#[derive(
+    Clone, Copy, Debug, Default, Eq, PartialEq, strum_macros::Display, strum_macros::EnumString,
+)]
+pub enum ReadlineKeymap {
+    /// Emacs editing commands.
+    #[default]
+    #[strum(serialize = "emacs-standard", to_string = "emacs")]
+    Emacs,
+    /// Commands prefixed by Meta in Emacs mode.
+    #[strum(serialize = "emacs-meta")]
+    EmacsMeta,
+    /// Commands prefixed by Control-X in Emacs mode.
+    #[strum(serialize = "emacs-ctlx")]
+    EmacsCtlx,
+    /// Commands available in Vi movement mode.
+    #[strum(serialize = "vi", serialize = "vi-move", to_string = "vi-command")]
+    ViCommand,
+    /// Commands available in Vi insertion mode.
+    #[strum(serialize = "vi-insert")]
+    ViInsert,
+}
+
 /// Encapsulates the shell's interaction with key bindings for input.
 pub trait KeyBindings: Send {
+    /// Returns whether Vi editing is active when the backend tracks editing mode.
+    fn vi_editing(&self) -> Option<bool> {
+        None
+    }
+
+    /// Returns the table used by binding and introspection operations.
+    fn keymap(&self) -> ReadlineKeymap {
+        ReadlineKeymap::Emacs
+    }
+
+    /// Selects the table used by binding and introspection operations.
+    fn select_keymap(&mut self, map: ReadlineKeymap) -> Result<(), std::io::Error> {
+        if map == self.keymap() {
+            Ok(())
+        } else {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "unsupported input keymap",
+            ))
+        }
+    }
+
+    /// Selects the backend's line editing mode and its default keymap.
+    fn set_vi_editing(&mut self, enabled: bool) -> Result<(), std::io::Error> {
+        self.select_keymap(if enabled {
+            ReadlineKeymap::ViInsert
+        } else {
+            ReadlineKeymap::Emacs
+        })
+    }
+
     /// Retrieves current bindings.
     fn get_current(&self) -> HashMap<KeySequence, KeyAction>;
 

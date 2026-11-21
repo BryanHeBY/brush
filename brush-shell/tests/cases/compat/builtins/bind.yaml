@@ -5,6 +5,47 @@ cases:
       bind > /dev/null 2>&1
       echo "exit: $?"
 
+  - name: "bind -f loads settings and bindings from the shell working directory"
+    args: ["run.sh"]
+    removed_default_args: ["--input-backend=basic"]
+    additional_test_args: ["--input-backend=reedline"]
+    ignore_stderr: true
+    test_files:
+      - path: "run.sh"
+        contents: |
+          cd settings
+          bind -f keys
+          printf 'load: %s\n' "$?"
+          bind -q menu-complete >/dev/null
+          printf 'Tab: %s\n' "$?"
+          bind -q history-search-forward >/dev/null
+          printf 'history: %s\n' "$?"
+          bind -v | grep -E '^set (colored-stats|completion-ignore-case|completion-prefix-display-length|completion-query-items|convert-meta|input-meta|mark-symlinked-directories|match-hidden-files|menu-complete-display-prefix|meta-flag|output-meta|page-completions|show-all-if-ambiguous|show-all-if-unmodified|skip-completed-text|visible-stats) ' | sort
+          bind -f missing
+          printf 'missing: %s\n' "$?"
+      - path: "settings/keys"
+        contents: |
+          # Load the same state in both shells.
+          set meta-flag off
+          set input-meta on
+          set convert-meta off
+          set output-meta on
+          set completion-ignore-case on
+          set completion-prefix-display-length 4
+          set completion-query-items 73
+          set mark-symlinked-directories on
+          set match-hidden-files off
+          set menu-complete-display-prefix on
+          set page-completions off
+          set show-all-if-ambiguous on
+          set show-all-if-unmodified on
+          set colored-stats on
+          set visible-stats on
+          set skip-completed-text on
+
+          "\e[B": history-search-forward
+          TAB: menu-complete
+
   - name: "bind -l"
     args: ["run.sh"]
     removed_default_args: ["--input-backend=basic"]
@@ -18,6 +59,76 @@ cases:
           echo "[bind -l]"
           bind -l | grep -v brush- | sort
           echo "bind -l result: ${PIPESTATUS[@]}"
+
+  - name: "bind -f evaluates includes and nested inputrc conditions"
+    args: ["run.sh"]
+    removed_default_args: ["--input-backend=basic"]
+    additional_test_args: ["--input-backend=reedline"]
+    ignore_stderr: true
+    min_oracle_version: "5.2"
+    test_files:
+      - path: "run.sh"
+        contents: |
+          export TERM=xterm-256color
+          bind -f settings/input
+          echo "status=$?"
+          bind -v | grep -E '^set (completion-query-items|completion-prefix-display-length|completion-display-width|print-completions-horizontally|search-ignore-case|bell-style|expand-tilde) ' | sort
+      - path: "settings/input"
+        contents: |
+          set search-ignore-case Off
+          $if Bash
+            $include extra settings
+            $if term=xterm
+              set completion-display-width 32
+            $else
+              set completion-display-width 53
+            $endif
+          $else
+            $include unselected
+          $endif
+          $if version>=8.0
+            $if print-completions-horizontally == on
+              set completion-query-items 77
+            $endif
+          $endif
+      - path: "extra settings"
+        contents: |
+          set print-completions-horizontally on
+          set bell-style none
+          set expand-tilde on
+          set completion-prefix-display-length 6 # trailing comment
+      - path: "settings/extra settings"
+        contents: |
+          set completion-prefix-display-length 19
+      - path: "unselected"
+        contents: |
+          set search-ignore-case on
+
+  - name: "bind -f and bind -m use separate keymaps"
+    args: ["run.sh"]
+    removed_default_args: ["--input-backend=basic"]
+    additional_test_args: ["--input-backend=reedline"]
+    ignore_stderr: true
+    test_files:
+      - path: "run.sh"
+        contents: |
+          bind -f keys
+          bind -m emacs -q menu-complete >/dev/null
+          echo "emacs=$?"
+          bind -m vi-command -q menu-complete >/dev/null
+          echo "vi=$?"
+          bind -m emacs-ctlx -q menu-complete-backward >/dev/null
+          echo "ctlx=$?"
+          bind -m emacs-ctlx -r q
+          bind -m emacs-ctlx -q menu-complete-backward >/dev/null
+          echo "removed=$?"
+      - path: "keys"
+        contents: |
+          set keymap vi-command
+          q: menu-complete
+          set keymap emacs-ctlx
+          q: menu-complete-backward
+          set keymap emacs
 
   - name: "bind -q/-P/-p"
     args: ["run.sh"]
@@ -184,3 +295,65 @@ cases:
       - path: "run.sh"
         contents: |
           bind -m bogus -p >/dev/null; echo "rc=$?"
+
+  - name: "readline terminal settings round trip through bind -f and -v"
+    args: ["run.sh"]
+    removed_default_args: ["--input-backend=basic"]
+    additional_test_args: ["--input-backend=reedline"]
+    ignore_stderr: true
+    test_files:
+      - path: "terminal.inputrc"
+        contents: |
+          set active-region-start-color \e[35m
+          set active-region-end-color \e[39m
+          set bind-tty-special-chars off
+          set blink-matching-paren on
+          set byte-oriented on
+          set echo-control-characters off
+          set enable-active-region on
+          set enable-keypad on
+          set enable-meta-key off
+          set force-meta-prefix on
+          set horizontal-scroll-mode on
+          set mark-modified-lines on
+          set prefer-visible-bell on
+          set revert-all-at-newline on
+      - path: "run.sh"
+        contents: |
+          bind -f terminal.inputrc || exit
+          bind -v | LC_ALL=C grep -E '^set (active-region-(start|end)-color|bell-style|bind-tty-special-chars|blink-matching-paren|byte-oriented|echo-control-characters|enable-(active-region|keypad|meta-key)|force-meta-prefix|horizontal-scroll-mode|mark-modified-lines|prefer-visible-bell|revert-all-at-newline) ' | LC_ALL=C sort
+          bind 'set prefer-visible-bell off'
+          bind -v | LC_ALL=C grep -E '^set (prefer-visible-bell|bell-style) ' | LC_ALL=C sort
+
+  - name: "readline numeric settings accept a decimal prefix and clamp negative values"
+    args: ["run.sh"]
+    removed_default_args: ["--input-backend=basic"]
+    additional_test_args: ["--input-backend=reedline"]
+    ignore_stderr: true
+    test_files:
+      - path: "run.sh"
+        contents: |
+          for value in -9 invalid +12 7ms; do
+            bind "set keyseq-timeout $value"
+            bind "set completion-query-items $value"
+            bind "set completion-prefix-display-length $value"
+            bind -v | LC_ALL=C grep -E '^set (keyseq-timeout|completion-query-items|completion-prefix-display-length) ' | LC_ALL=C sort
+          done
+          bind 'set editing-mode Vi'
+          bind -v | grep '^set editing-mode '
+
+  - name: "bind -X round trips quotes, backslashes and non-ASCII commands"
+    args: ["run.sh"]
+    removed_default_args: ["--input-backend=basic"]
+    additional_test_args: ["--input-backend=reedline"]
+    min_oracle_version: "5.3"
+    ignore_stderr: true
+    test_files:
+      - path: "run.sh"
+        contents: |
+          bind -x '"\C-t": printf "\"%s\"\n" café'
+          definition=$(bind -X)
+          printf '%s\n' "$definition"
+          bind -r '\C-t'
+          bind -x "$definition"
+          bind -X

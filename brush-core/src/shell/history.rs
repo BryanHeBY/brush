@@ -120,6 +120,9 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
             timestamp: Some(crate::history::ItemTimestamp::now()),
             dirty: true,
         })?;
+        if let Some(limit) = self.readline_options.history_size {
+            history.retain_last(limit);
+        }
 
         Ok(())
     }

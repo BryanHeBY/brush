@@ -171,7 +171,14 @@ impl<SE: brush_core::ShellExtensions> builtins::Builtin<SE> for SetCommand {
                         )?;
                         return Ok(ExecutionExitCode::InvalidUsage.into());
                     };
+                    let was_vi = options.vi_mode;
                     definition.set(options, *on);
+                    if was_vi != options.vi_mode {
+                        let vi = options.vi_mode;
+                        if let Some(bindings) = context.shell.key_bindings() {
+                            let _ = bindings.lock().await.set_vi_editing(vi);
+                        }
+                    }
                 }
             }
         }

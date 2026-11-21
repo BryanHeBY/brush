@@ -125,6 +125,8 @@ mod factory;
 mod lookup;
 mod unimp;
 
+#[cfg(feature = "builtin.bind")]
+pub use bind::load_default_inputrc;
 pub use builder::ShellBuilderExt;
 pub use factory::{BuiltinSet, default_builtins};
 

@@ -144,36 +144,130 @@ pub fn key_sequence_to_strokes(
     Ok(strokes)
 }
 
+fn symbolic_key(input: &str) -> Result<KeySequence, &'static str> {
+    let name = input.trim();
+    let lower = name.to_ascii_lowercase();
+    let mut rest = lower.as_str();
+    let mut modifiers = Vec::new();
+    loop {
+        if let Some(after) = rest
+            .strip_prefix("control-")
+            .or_else(|| rest.strip_prefix("c-"))
+        {
+            modifiers.push(KeySequenceItem::Control);
+            rest = after;
+        } else if let Some(after) = rest
+            .strip_prefix("meta-")
+            .or_else(|| rest.strip_prefix("m-"))
+        {
+            modifiers.push(KeySequenceItem::Meta);
+            rest = after;
+        } else {
+            break;
+        }
+    }
+    let byte = match rest {
+        "escape" | "esc" => b'\x1b',
+        "delete" | "del" | "rubout" => b'\x7f',
+        "backspace" | "bs" => b'\x08',
+        "space" | "spc" => b' ',
+        "return" | "ret" => b'\r',
+        "newline" | "linefeed" | "lfd" => b'\n',
+        "tab" => b'\t',
+        "nul" | "null" => b'\0',
+        _ => {
+            let original = name
+                .get(name.len().saturating_sub(rest.len())..)
+                .unwrap_or(rest);
+            let mut chars = original.chars();
+            let Some(c) = chars.next().filter(|_| chars.next().is_none()) else {
+                return Err("unknown symbolic key");
+            };
+            modifiers.extend(utf8_bytes(c));
+            return Ok(KeySequence(modifiers));
+        }
+    };
+    modifiers.push(KeySequenceItem::Byte(byte));
+    Ok(KeySequence(modifiers))
+}
+
+// In the whitespace-separated form of bind -x the surrounding quotes are
+// Readline quoting. Decode those escapes before passing the command to the shell.
+fn expand_quoted_shell_command(command: &str) -> Result<String, &'static str> {
+    let seq = readline_binding::key_sequence(command).map_err(|_| "invalid command escape")?;
+    let strokes = key_sequence_to_strokes(&seq).map_err(|_| "missing command escape byte")?;
+    let mut bytes = Vec::new();
+    for stroke in strokes {
+        for mut byte in stroke.key_code {
+            if stroke.control {
+                byte = if byte == b'?' { 0x7f } else { byte & 0x1f };
+            }
+            if stroke.meta {
+                byte |= 0x80;
+            }
+            bytes.push(byte);
+        }
+    }
+    String::from_utf8(bytes).map_err(|_| "shell command is not UTF-8")
+}
+
+fn utf8_bytes(character: char) -> Vec<KeySequenceItem> {
+    character
+        .encode_utf8(&mut [0; 4])
+        .bytes()
+        .map(KeySequenceItem::Byte)
+        .collect()
+}
+
 peg::parser! {
     grammar readline_binding() for str {
-        rule _() = [' ' | '\t' | '\n']*
+        rule _() = [' ' | '\t']*
+        rule spaced() = [' ' | '\t']+
 
         pub rule key_sequence_shell_cmd_binding() -> KeySequenceShellCommandBinding =
-            _ "\"" seq:key_sequence() "\"" _ ":" _ cmd:shell_cmd() _ { KeySequenceShellCommandBinding { seq, shell_cmd: cmd } }
-
-        pub rule key_sequence_readline_binding() -> KeySequenceReadlineBinding =
-            _ "\"" seq:key_sequence() "\"" _ ":" _ "\"" cmd:readline_cmd() "\"" _ {
-                KeySequenceReadlineBinding { seq, target: ReadlineTarget::Macro(cmd) }
+            _ seq:readline_binding_key() _ ":" _ cmd:$([_]*) {
+                KeySequenceShellCommandBinding { seq, shell_cmd: cmd.to_owned() }
             } /
-            _ "\"" seq:key_sequence() "\"" _ ":" _ func:readline_function() _ {
-                KeySequenceReadlineBinding { seq, target: ReadlineTarget::Function(func) }
+            _ seq:readline_binding_key() spaced() cmd:quoted_macro() _ {?
+                let shell_cmd = expand_quoted_shell_command(&cmd)?;
+                Ok(KeySequenceShellCommandBinding { seq, shell_cmd })
             }
 
-        rule readline_cmd() -> String = s:$([^'"']*) { s.to_string() }
-        rule shell_cmd() -> String = s:$([_]*) { s.to_string() }
-        rule readline_function() -> String = s:$([_]*) { s.to_string() }
+        pub rule key_sequence_readline_binding() -> KeySequenceReadlineBinding =
+            _ seq:readline_binding_key() _ ":" _ cmd:quoted_macro() ending() {
+                KeySequenceReadlineBinding { seq, target: ReadlineTarget::Macro(cmd) }
+            } /
+            _ seq:readline_binding_key() _ ":" _ func:$(['a'..='z' | 'A'..='Z' | '0'..='9' | '_' | '-']+) ending() {
+                KeySequenceReadlineBinding { seq, target: ReadlineTarget::Function(func.to_owned()) }
+            }
 
-        // Main rule for parsing a key sequence
+        rule ending() = _ ("#" [_]*)?
+
+        rule readline_binding_key() -> KeySequence =
+            "\"" seq:quoted_key_sequence() "\"" { seq } /
+            name:$([^':' | '"' | ' ' | '\t']+) {? symbolic_key(name) }
+
+        rule quoted_macro() -> String =
+            "\"" body:$(( "\\" [_] / [^'"' | '\\'] )*) "\"" { body.to_owned() } /
+            "'" body:$(( "\\" [_] / [^'\'' | '\\'] )*) "'" { body.to_owned() }
+
+        rule quoted_key_sequence() -> KeySequence =
+            items:key_sequence_item()* { KeySequence(items.into_iter().flatten().collect()) }
+
         pub rule key_sequence() -> KeySequence =
-            items:key_sequence_item()* { KeySequence(items) }
+            items:(key_sequence_item() / "\"" { vec![KeySequenceItem::Byte(b'"')] })* {
+                KeySequence(items.into_iter().flatten().collect())
+            }
 
-        rule key_sequence_item() -> KeySequenceItem =
+        rule key_sequence_item() -> Vec<KeySequenceItem> =
+            item:escape_item() { vec![item] } /
+            "\\" c:[_] { utf8_bytes(c) } /
+            c:[^'"' | '\\'] { utf8_bytes(c) }
+
+        rule escape_item() -> KeySequenceItem =
             "\\C-" { KeySequenceItem::Control } /
             "\\M-" { KeySequenceItem::Meta } /
             "\\e" { KeySequenceItem::Byte(b'\x1b') } /
-            "\\\\" { KeySequenceItem::Byte(b'\\') } /
-            "\\\"" { KeySequenceItem::Byte(b'"') } /
-            "\\'" { KeySequenceItem::Byte(b'\'') } /
             "\\a" { KeySequenceItem::Byte(b'\x07') } /
             "\\b" { KeySequenceItem::Byte(b'\x08') } /
             "\\d" { KeySequenceItem::Byte(b'\x7f') } /
@@ -182,9 +276,8 @@ peg::parser! {
             "\\r" { KeySequenceItem::Byte(b'\r') } /
             "\\t" { KeySequenceItem::Byte(b'\t') } /
             "\\v" { KeySequenceItem::Byte(b'\x0b') } /
-            "\\" n:octal_number() { KeySequenceItem::Byte(n) } /
-            "\\" n:hex_number() { KeySequenceItem::Byte(n) } /
-            [c if c != '"'] { KeySequenceItem::Byte(c as u8) }
+            "\\x" n:hex_number() { KeySequenceItem::Byte(n) } /
+            "\\" n:octal_number() { KeySequenceItem::Byte(n) }
 
         rule octal_number() -> u8 =
             s:$(['0'..='7']*<1,3>) {? u8::from_str_radix(s, 8).or(Err("invalid octal number")) }

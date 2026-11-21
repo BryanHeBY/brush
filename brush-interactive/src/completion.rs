@@ -9,6 +9,21 @@ pub(crate) async fn complete_async(
     pos: usize,
 ) -> brush_core::completion::Completions {
     let working_dir = shell.working_dir().to_path_buf();
+    let home = if shell.readline_options().expand_tilde {
+        None
+    } else {
+        shell
+            .env_str("HOME")
+            .filter(|path| !path.is_empty())
+            .map(|path| PathBuf::from(path.into_owned()))
+    };
+    let mut filenames = FilePresentation {
+        working_dir: &working_dir,
+        mark_directories: shell.completion_config().fallback_options.mark_directories,
+        mark_symlinked_directories: shell.readline_options().mark_symlinked_directories,
+        replace_home_with_tilde: None,
+    };
+    let skip_completed_text = shell.readline_options().skip_completed_text;
 
     // Intentionally ignore any errors that arise.
     let completion_future = shell.complete(line, pos);
@@ -57,6 +72,12 @@ pub(crate) async fn complete_async(
     }
 
     let completing_end_of_line = pos == line.len();
+    if line
+        .get(completions.insertion_index..pos)
+        .is_some_and(|text| text.starts_with("~/"))
+    {
+        filenames.replace_home_with_tilde = home.as_deref();
+    }
 
     // Deduplicate the candidates (retaining order), then postprocess them.
     completions.candidates = completions
@@ -68,36 +89,100 @@ pub(crate) async fn complete_async(
             postprocess_completion_candidate(
                 candidate,
                 &completions.options,
-                working_dir.as_ref(),
+                &filenames,
                 completing_end_of_line,
                 quote_char,
             )
         })
         .collect();
 
+    if skip_completed_text
+        && let [candidate] = completions.candidates.as_mut_slice()
+        && let Some(after_cursor) = line.get(pos..).filter(|text| !text.is_empty())
+        && let Some(word) = line.get(completions.insertion_index..pos)
+        && let Some(suffix) = candidate.strip_prefix(word)
+    {
+        let matching = matching_prefix_len(suffix, after_cursor);
+        completions.delete_count += matching;
+        if matching == after_cursor.len() {
+            append_completion_space(candidate, &completions.options);
+        }
+    }
+
     completions
+}
+
+/// Returns the byte length of the prefix these strings share.
+pub(crate) fn matching_prefix_len(first: &str, second: &str) -> usize {
+    first
+        .chars()
+        .zip(second.chars())
+        .take_while(|(first, second)| first == second)
+        .map(|(c, _)| c.len_utf8())
+        .sum()
+}
+
+#[cfg(reedline_backend)]
+pub(crate) fn common_prefix_len(candidates: &[impl AsRef<str>], ignore_case: bool) -> usize {
+    let Some((first, rest)) = candidates.split_first() else {
+        return 0;
+    };
+    let first = first.as_ref();
+    rest.iter().fold(first.len(), |length, candidate| {
+        first
+            .get(..length)
+            .unwrap_or_default()
+            .chars()
+            .zip(candidate.as_ref().chars())
+            .take_while(|(left, right)| {
+                left == right || ignore_case && left.eq_ignore_ascii_case(right)
+            })
+            .map(|(c, _)| c.len_utf8())
+            .sum()
+    })
+}
+
+#[allow(dead_code)]
+struct FilePresentation<'a> {
+    working_dir: &'a Path,
+    mark_directories: bool,
+    mark_symlinked_directories: Option<bool>,
+    replace_home_with_tilde: Option<&'a Path>,
 }
 
 #[allow(dead_code)]
 fn postprocess_completion_candidate(
     mut candidate: String,
     options: &brush_core::completion::ProcessingOptions,
-    working_dir: &Path,
+    filenames: &FilePresentation<'_>,
     completing_end_of_line: bool,
     quote_char: Option<char>,
 ) -> String {
     if options.treat_as_filenames {
         // Check if it's a directory.
-        if !brush_core::sys::fs::ends_with_path_separator(&candidate) {
+        if filenames.mark_directories && !brush_core::sys::fs::ends_with_path_separator(&candidate)
+        {
             let candidate_path = Path::new(&candidate);
             let abs_candidate_path = if candidate_path.is_absolute() {
                 PathBuf::from(candidate_path)
             } else {
-                working_dir.join(candidate_path)
+                filenames.working_dir.join(candidate_path)
             };
 
-            if abs_candidate_path.is_dir() {
+            let mark = filenames.mark_symlinked_directories != Some(false)
+                || !abs_candidate_path.is_symlink();
+            if mark && abs_candidate_path.is_dir() {
                 // Use forward slash: backslash is the shell escape character.
+                candidate.push('/');
+            }
+        }
+
+        if let Some(home) = filenames.replace_home_with_tilde
+            && let Ok(relative) = Path::new(&candidate).strip_prefix(home)
+        {
+            let had_separator = brush_core::sys::fs::ends_with_path_separator(&candidate);
+            candidate = format!("~/{}", relative.to_string_lossy());
+            if had_separator && !candidate.ends_with('/') {
                 candidate.push('/');
             }
         }
@@ -117,14 +202,23 @@ fn postprocess_completion_candidate(
             candidate = escape::quote(&candidate, &options).to_string();
         }
     }
-    if completing_end_of_line && !options.no_trailing_space_at_end_of_line {
-        if !options.treat_as_filenames || !brush_core::sys::fs::ends_with_path_separator(&candidate)
-        {
-            candidate.push(' ');
-        }
+    if completing_end_of_line {
+        append_completion_space(&mut candidate, options);
     }
 
     candidate
+}
+
+fn append_completion_space(
+    candidate: &mut String,
+    options: &brush_core::completion::ProcessingOptions,
+) {
+    if !options.no_trailing_space_at_end_of_line
+        && (!options.treat_as_filenames
+            || !brush_core::sys::fs::ends_with_path_separator(candidate))
+    {
+        candidate.push(' ');
+    }
 }
 
 #[cfg(test)]
@@ -140,7 +234,12 @@ mod tests {
         postprocess_completion_candidate(
             candidate.to_owned(),
             &options,
-            Path::new("/nonexistent"),
+            &FilePresentation {
+                working_dir: Path::new("/nonexistent"),
+                mark_directories: true,
+                mark_symlinked_directories: None,
+                replace_home_with_tilde: None,
+            },
             true,
             None,
         )

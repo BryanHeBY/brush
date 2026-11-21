@@ -274,6 +274,7 @@ impl<SE: extensions::ShellExtensions> Default for Shell<SE> {
             call_stack: callstack::CallStack::new(),
             directory_stack: vec![],
             completion: completion::State::default(),
+            readline_options: super::ReadlineOptions::default(),
             builtins: builtins::Registry::default(),
             program_location_cache: pathcache::PathCache::default(),
             last_stopwatch_time: std::time::SystemTime::now(),

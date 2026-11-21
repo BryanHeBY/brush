@@ -1,14 +1,16 @@
 //! Keys: decoding them from the bytes a terminal sends, and encoding them back.
 
-use std::collections::VecDeque;
-use std::time::Duration;
+#[cfg(feature = "vt")]
+use std::{collections::VecDeque, time::Duration};
 
 use brush_core::interfaces::{Key, KeyStroke};
 
-use super::terminal::Terminal;
+#[cfg(feature = "vt")]
+use crate::vt::Terminal;
 
 /// How long to wait for the rest of a key sequence: readline's default
 /// `keyseq-timeout`.
+#[cfg(feature = "vt")]
 pub(crate) const KEYSEQ_TIMEOUT: Duration = Duration::from_millis(500);
 
 const ESC: u8 = 0x1b;
@@ -24,6 +26,7 @@ pub(crate) struct Keypress {
     pub from_macro: bool,
 }
 
+#[cfg(feature = "vt")]
 impl Keypress {
     /// Returns the char this key types, if it's a plain character key.
     pub const fn typed_char(&self) -> Option<char> {
@@ -48,6 +51,7 @@ impl Keypress {
 /// sequence or UTF-8 character may be split between them; the reader holds on to
 /// an incomplete one until the rest arrives, waiting only briefly for the rest of
 /// an escape sequence before taking what it has as keys of their own.
+#[cfg(feature = "vt")]
 #[derive(Default)]
 pub(crate) struct KeyReader {
     /// Bytes read but not yet decoded.
@@ -56,6 +60,7 @@ pub(crate) struct KeyReader {
     queued: VecDeque<Keypress>,
 }
 
+#[cfg(feature = "vt")]
 impl KeyReader {
     /// Returns the next key, waiting for one if need be; `None` at the end of
     /// input.
@@ -149,7 +154,7 @@ pub(crate) fn decode_all(mut bytes: &[u8]) -> Vec<Keypress> {
 /// * `more_coming` - Whether more bytes may be about to arrive. When `false`, the
 ///   start of an escape sequence is taken to be keys of its own (e.g., a lone
 ///   Escape is the Escape key).
-fn decode(bytes: &[u8], more_coming: bool) -> Option<(Option<KeyStroke>, usize)> {
+pub(crate) fn decode(bytes: &[u8], more_coming: bool) -> Option<(Option<KeyStroke>, usize)> {
     let &first = bytes.first()?;
     let stroke = match first {
         ESC => return decode_escape(bytes, more_coming),
@@ -233,8 +238,7 @@ fn decode_csi(bytes: &[u8], more_coming: bool) -> Option<(Option<KeyStroke>, usi
     let mut params = params.split(';').map(|p| p.parse::<u32>().ok());
     let number = params.next().flatten();
     // A modifier, if present, is the second parameter (e.g., `ESC [ 1 ; 5 C`): 1
-    // plus 2 for Alt and 4 for Ctrl (and 1 for Shift, which `bind` can't express,
-    // so it's left out).
+    // plus 1 for Shift, 2 for Alt, and 4 for Ctrl.
     let modifier = params.next().flatten().unwrap_or(1).saturating_sub(1);
 
     let key = match (final_byte, number) {
@@ -255,7 +259,7 @@ fn decode_csi(bytes: &[u8], more_coming: bool) -> Option<(Option<KeyStroke>, usi
     let stroke = key.map(|key| KeyStroke {
         alt: modifier & 2 != 0,
         control: modifier & 4 != 0,
-        shift: false,
+        shift: modifier & 1 != 0 && key != Key::BackTab,
         key,
     });
     Some((stroke, 2 + final_index + 1))
@@ -324,7 +328,8 @@ fn tilde_number(key: &Key) -> Option<u32> {
 /// nothing if it doesn't send any this backend knows.
 pub(crate) fn encode(stroke: &KeyStroke) -> Vec<u8> {
     let alt_prefix = if stroke.alt { &[ESC][..] } else { &[] };
-    let modifier = 1 + 2 * u32::from(stroke.alt) + 4 * u32::from(stroke.control);
+    let modifier =
+        1 + u32::from(stroke.shift) + 2 * u32::from(stroke.alt) + 4 * u32::from(stroke.control);
     // Cursor and function keys carry their modifiers as a parameter.
     let csi = |final_byte: char| {
         if modifier == 1 {
@@ -480,8 +485,10 @@ mod tests {
                 stroke(false, true, Key::Right),
                 stroke(true, false, Key::Left),
                 stroke(true, true, Key::Up),
-                // Shift isn't something `bind` can express, so it's left out.
-                plain(Key::Down),
+                Some(KeyStroke {
+                    shift: true,
+                    ..KeyStroke::from(Key::Down)
+                }),
                 stroke(false, true, Key::PageUp),
                 plain(Key::BackTab),
                 plain(Key::Insert),
@@ -500,6 +507,16 @@ mod tests {
                 plain(Key::End),
             ]
         );
+    }
+
+    #[test]
+    fn shift_right_round_trips_through_terminal_bytes() {
+        let key = KeyStroke {
+            shift: true,
+            ..KeyStroke::from(Key::Right)
+        };
+        assert_eq!(encode(&key), b"\x1b[1;2C");
+        assert_eq!(keys(b"\x1b[1;2C"), [Some(key)]);
     }
 
     #[test]

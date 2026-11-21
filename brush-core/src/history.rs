@@ -152,6 +152,18 @@ impl History {
         }
     }
 
+    /// Discards the oldest entries until at most `limit` remain.
+    pub fn retain_last(&mut self, limit: usize) {
+        let mut remove = self.count().saturating_sub(limit);
+        if remove != 0 {
+            self.retain(|_| {
+                let keep = remove == 0;
+                remove = remove.saturating_sub(1);
+                keep
+            });
+        }
+    }
+
     /// Adds a new history item. Returns the unique identifier of the newly added item.
     ///
     /// # Arguments

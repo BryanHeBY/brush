@@ -58,10 +58,7 @@ impl<SE: brush_core::ShellExtensions> reedline::History for ReedlineHistory<SE> 
         let query = reedline_history_query_into_brush(query)?;
 
         let shell = self.lock_shell();
-        let count = get_shell_history(&shell)?
-            .search(query)
-            .map_err(brush_error_to_reedline)?
-            .count();
+        let count = matching_history(&shell, query)?.count();
         drop(shell);
 
         #[expect(clippy::cast_possible_wrap)]
@@ -77,9 +74,7 @@ impl<SE: brush_core::ShellExtensions> reedline::History for ReedlineHistory<SE> 
     fn search(&self, query: reedline::SearchQuery) -> reedline::Result<Vec<reedline::HistoryItem>> {
         let query = reedline_history_query_into_brush(query)?;
         let shell = self.lock_shell();
-        let items = get_shell_history(&shell)?
-            .search(query)
-            .map_err(brush_error_to_reedline)?
+        let items = matching_history(&shell, query)?
             .map(|item| {
                 // Translate the item into reedline's format.
                 brush_history_item_to_reedline(item)
@@ -142,6 +137,48 @@ impl<SE: brush_core::ShellExtensions> reedline::History for ReedlineHistory<SE> 
         // Not implemented for now.
         None
     }
+}
+
+fn matching_history<'a, SE: brush_core::ShellExtensions>(
+    shell: &'a tokio::sync::MutexGuard<'_, brush_core::Shell<SE>>,
+    mut query: brush_core::history::Query,
+) -> reedline::Result<impl Iterator<Item = &'a brush_core::history::Item>> {
+    use brush_core::history::CommandLineFilter;
+
+    let filter = if shell.readline_options().search_ignore_case {
+        query.command_line_filter.take().map(|filter| match filter {
+            CommandLineFilter::Exact(value) => CommandLineFilter::Exact(value.to_lowercase()),
+            CommandLineFilter::Contains(value) => CommandLineFilter::Contains(value.to_lowercase()),
+            CommandLineFilter::Prefix(value) => CommandLineFilter::Prefix(value.to_lowercase()),
+            CommandLineFilter::Suffix(value) => CommandLineFilter::Suffix(value.to_lowercase()),
+        })
+    } else {
+        None
+    };
+    let limit = if filter.is_some() {
+        query
+            .max_items
+            .take()
+            .and_then(|limit| usize::try_from(limit).ok())
+    } else {
+        None
+    };
+    let entries = get_shell_history(shell)?
+        .search(query)
+        .map_err(brush_error_to_reedline)?;
+    Ok(entries
+        .filter(move |item| {
+            filter.as_ref().is_none_or(|filter| {
+                let command = item.command_line.to_lowercase();
+                match filter {
+                    CommandLineFilter::Exact(value) => command == *value,
+                    CommandLineFilter::Contains(value) => command.contains(value),
+                    CommandLineFilter::Prefix(value) => command.starts_with(value),
+                    CommandLineFilter::Suffix(value) => command.ends_with(value),
+                }
+            })
+        })
+        .take(limit.unwrap_or(usize::MAX)))
 }
 
 fn brush_history_item_to_reedline(item: &brush_core::history::Item) -> reedline::HistoryItem {

@@ -1,16 +1,21 @@
 use nu_ansi_term::Style;
 use reedline::MenuBuilder;
 
-use super::{completer, edit_mode, highlighter, history, validator};
+use super::{completer, edit_mode, highlighter, history, readline, validator};
 use crate::{InputBackend, ReadResult, ShellError, input_backend::InteractivePrompt, refs};
 
 /// Represents an interactive shell capable of taking commands from standard input
 /// and reporting results to standard output and standard error streams.
 pub struct ReedlineInputBackend {
     reedline: Option<reedline::Reedline>,
+    readline_session: readline::Session,
+    keymaps: std::sync::Arc<tokio::sync::Mutex<edit_mode::BindingMaps>>,
+    allow_bracketed_paste: bool,
+    terminal_input: std::sync::Arc<std::sync::Mutex<super::terminal_input::TerminalInput>>,
 }
 
-const COMPLETION_MENU_NAME: &str = "completion_menu";
+pub(super) const COMPLETION_MENU_NAME: &str = "completion_menu";
+pub(super) const RELOAD_INPUTRC: &str = "\0brush:reload-inputrc";
 
 fn completion_menu_text_style() -> Style {
     Style::new()
@@ -32,6 +37,49 @@ fn history_hint_style() -> Style {
     Style::new().italic().dimmed()
 }
 
+struct TerminalModes(Vec<u8>);
+
+impl TerminalModes {
+    fn enter(options: &brush_core::ReadlineOptions) -> std::io::Result<Self> {
+        use std::io::Write as _;
+        let (enter, leave) = brush_core::sys::input::readline_terminal_modes(
+            options.enable_keypad,
+            options.enable_meta_key,
+        );
+        let guard = Self(leave);
+        let mut terminal = std::io::stderr().lock();
+        terminal.write_all(&enter)?;
+        terminal.flush()?;
+        Ok(guard)
+    }
+}
+
+impl Drop for TerminalModes {
+    fn drop(&mut self) {
+        use std::io::Write as _;
+        let mut terminal = std::io::stderr().lock();
+        let _ = terminal.write_all(&self.0).and_then(|()| terminal.flush());
+    }
+}
+
+fn active_region_color(setting: Option<&str>, default: &str) -> String {
+    use brush_parser::readline_binding::{KeySequenceItem, parse_key_sequence};
+
+    setting
+        .and_then(|value| parse_key_sequence(value).ok())
+        .map(|seq| {
+            seq.0
+                .into_iter()
+                .filter_map(|item| match item {
+                    KeySequenceItem::Byte(byte) => Some(byte),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        })
+        .and_then(|bytes| String::from_utf8(bytes).ok())
+        .unwrap_or_else(|| default.to_owned())
+}
+
 impl ReedlineInputBackend {
     /// Returns a new interactive shell instance, created with the provided options.
     ///
@@ -47,7 +95,9 @@ impl ReedlineInputBackend {
         let key_bindings = compose_key_bindings(COMPLETION_MENU_NAME);
 
         // Set up mutable edit mode.
-        let mutable_edit_mode = edit_mode::MutableEditMode::new(key_bindings);
+        let readline_session = readline::Session::default();
+        let mutable_edit_mode =
+            edit_mode::MutableEditMode::new(key_bindings, readline_session.clone());
         let updatable_bindings = mutable_edit_mode.bindings();
 
         // Create helper objects that implement reedline traits; each will
@@ -87,11 +137,7 @@ impl ReedlineInputBackend {
                 .with_selected_match_text_style(completion_menu_selected_match_text_style()),
         );
 
-        // Set up default history-based hinter.
-        let mut hinter = reedline::DefaultHinter::default();
-        if !options.disable_color {
-            hinter = hinter.with_style(history_hint_style());
-        }
+        let hinter = readline::HistoryHinter::new(readline_session.clone(), history_hint_style());
 
         // Instantiate reedline with some defaults and hand it ownership of
         // the helpers.
@@ -104,6 +150,7 @@ impl ReedlineInputBackend {
             .with_hinter(Box::new(hinter))
             .with_menu(reedline::ReedlineMenu::EngineCompleter(completion_menu))
             .with_edit_mode(Box::new(mutable_edit_mode))
+            .with_ordered_input(true)
             .with_history(Box::new(history));
 
         // Override Reedline's default example highlighter, which hard-codes white as the
@@ -117,15 +164,28 @@ impl ReedlineInputBackend {
             };
         }
 
+        reedline = readline::install(
+            reedline,
+            shell_ref,
+            &readline_session,
+            !options.disable_color,
+        );
+
         let mut shell = tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(shell_ref.lock())
         });
 
-        shell.set_key_bindings(Some(updatable_bindings));
+        shell.set_key_bindings(Some(updatable_bindings.clone()));
         drop(shell);
 
         Ok(Self {
             reedline: Some(reedline),
+            readline_session,
+            keymaps: updatable_bindings,
+            allow_bracketed_paste: !options.disable_bracketed_paste,
+            terminal_input: std::sync::Arc::new(std::sync::Mutex::new(
+                super::terminal_input::TerminalInput::new(std::time::Duration::from_millis(500)),
+            )),
         })
     }
 }
@@ -153,23 +213,89 @@ impl InputBackend for ReedlineInputBackend {
     /// # Arguments
     ///
     /// * `prompt` - The prompt to display to the user.
-    #[allow(
-        clippy::unused_async_trait_impl,
-        reason = "this backend reads synchronously; the trait is async for those that don't"
-    )]
     async fn read_line(
         &mut self,
-        _shell: &crate::ShellRef<impl brush_core::ShellExtensions>,
+        shell: &crate::ShellRef<impl brush_core::ShellExtensions>,
         prompt: InteractivePrompt,
     ) -> Result<ReadResult, ShellError> {
+        let (options, raw_input) = {
+            let shell = shell.lock().await;
+            let options = shell.readline_options().clone();
+            let raw_input = {
+                let mut keymaps = self.keymaps.lock().await;
+                keymaps.sync_shell_mode(shell.options().vi_mode);
+                keymaps.set_chord_timeout(options.keyseq_timeout);
+                keymaps.set_terminal_options(&options)
+            };
+            let utf8_locale = ["LC_ALL", "LC_CTYPE", "LANG"]
+                .into_iter()
+                .find_map(|name| shell.env_str(name).filter(|value| !value.is_empty()))
+                .is_none_or(|locale| {
+                    let locale = locale.to_ascii_lowercase();
+                    locale.contains("utf-8") || locale.contains("utf8")
+                });
+            self.readline_session
+                .lock()
+                .begin(options.clone(), utf8_locale);
+            drop(shell);
+            (options, raw_input)
+        };
+        if let Some(enabled) = options.enable_bracketed_paste {
+            self.reedline = self.reedline.take().map(|reedline| {
+                reedline.use_bracketed_paste(enabled && self.allow_bracketed_paste)
+            });
+        }
         let Some(reedline) = &mut self.reedline else {
             return Ok(ReadResult::Eof);
         };
-
+        let interrupt_byte = brush_core::sys::input::readline_terminal_keys()
+            .into_iter()
+            .find_map(|(byte, function)| function.is_none().then_some(byte));
+        super::terminal_input::attach(
+            reedline,
+            &self.terminal_input,
+            raw_input,
+            std::time::Duration::from_millis(options.keyseq_timeout),
+        );
+        reedline.set_editable_history(true);
+        reedline.set_byte_oriented(options.byte_oriented);
+        reedline.set_line_display(reedline::LineDisplay {
+            horizontal_scroll: options.horizontal_scroll_mode,
+            echo_interrupt: options
+                .echo_control_characters
+                .then(|| char::from(interrupt_byte.unwrap_or(3) ^ 0x40)),
+            blink_matching_bracket: options.blink_matching_paren,
+            active_region: options.enable_active_region.unwrap_or(true).then(|| {
+                let (start, end) = brush_core::sys::input::readline_terminal_standout();
+                (
+                    active_region_color(options.active_region_start_color.as_deref(), &start),
+                    active_region_color(options.active_region_end_color.as_deref(), &end),
+                )
+            }),
+            mark_modified_history: options.mark_modified_lines,
+            accept_history_search: true,
+            revert_history_on_submit: options.revert_all_at_newline,
+        });
+        let _terminal_modes = TerminalModes::enter(&options).map_err(ShellError::InputError)?;
+        let prompt = super::prompt::ReadlinePrompt {
+            prompt: &prompt,
+            options: &options,
+            keymaps: &self.keymaps,
+        };
         match reedline.read_line(&prompt) {
             Ok(reedline::Signal::Success(s)) => Ok(ReadResult::Input(s)),
             Ok(reedline::Signal::CtrlC(_)) => Ok(ReadResult::Interrupted),
             Ok(reedline::Signal::CtrlD) => Ok(ReadResult::Eof),
+            Ok(reedline::Signal::HostCommand(cmd)) if cmd == RELOAD_INPUTRC => {
+                let command = options
+                    .init_file
+                    .as_ref()
+                    .and_then(|path| path.to_str())
+                    .map_or_else(String::new, |path| {
+                        format!("builtin bind -f {}", brush_core::escape::single_quote(path))
+                    });
+                Ok(ReadResult::BoundCommand(command))
+            }
             Ok(reedline::Signal::HostCommand(cmd)) => Ok(ReadResult::BoundCommand(cmd)),
             Ok(_) => Err(ShellError::UnexpectedInputFailure),
             Err(err) => Err(ShellError::InputError(err)),
@@ -177,25 +303,12 @@ impl InputBackend for ReedlineInputBackend {
     }
 
     fn get_read_buffer(&self) -> Option<(String, usize)> {
-        self.reedline.as_ref().map(|r| {
-            (
-                r.current_buffer_contents().to_owned(),
-                r.current_insertion_point(),
-            )
-        })
+        self.reedline.as_ref().map(reedline::Reedline::host_buffer)
     }
 
     fn set_read_buffer(&mut self, buffer: String, cursor: usize) {
         if let Some(reedline) = &mut self.reedline {
-            reedline.run_edit_commands(&[
-                reedline::EditCommand::MoveToStart { select: false },
-                reedline::EditCommand::ClearToLineEnd,
-                reedline::EditCommand::InsertString(buffer),
-                reedline::EditCommand::MoveToPosition {
-                    position: cursor,
-                    select: false,
-                },
-            ]);
+            reedline.set_host_buffer(buffer, cursor);
         }
     }
 }
@@ -219,14 +332,10 @@ fn compose_key_bindings(completion_menu_name: &str) -> reedline::Keybindings {
         reedline::KeyCode::BackTab,
         reedline::ReedlineEvent::MenuPrevious,
     );
-
     // Add undo.
-    // NOTE: To match readline, we bind Ctrl+_ to undo; in practice, the only way
-    // to get that to work out is to specify Ctrl+7 for the binding. It's not clear
-    // that this is terribly portable across terminals/environments.
     key_bindings.add_binding(
         reedline::KeyModifiers::CONTROL,
-        reedline::KeyCode::Char('7'),
+        reedline::KeyCode::Char('_'),
         reedline::ReedlineEvent::Edit(vec![reedline::EditCommand::Undo]),
     );
 

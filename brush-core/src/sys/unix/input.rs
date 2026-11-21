@@ -82,3 +82,111 @@ pub fn try_get_key_from_key_code(key_code: &[u8]) -> Option<interfaces::Key> {
         None
     }
 }
+
+/// Returns the terminal sequences for entering and leaving its keypad and Meta modes.
+pub fn readline_terminal_modes(keypad: bool, meta: bool) -> (Vec<u8>, Vec<u8>) {
+    let Ok(ti) = terminfo::Database::from_env() else {
+        return (Vec::new(), Vec::new());
+    };
+    let mut enter = Vec::new();
+    let mut leave = Vec::new();
+    if keypad {
+        if let Some(cap) = ti.get::<cap::KeypadXmit<'_>>() {
+            let _ = cap.expand().to(&mut enter);
+        }
+        if let Some(cap) = ti.get::<cap::KeypadLocal<'_>>() {
+            let _ = cap.expand().to(&mut leave);
+        }
+    }
+    if meta {
+        if let Some(cap) = ti.get::<cap::MetaOn<'_>>() {
+            let _ = cap.expand().to(&mut enter);
+        }
+        if let Some(cap) = ti.get::<cap::MetaOff<'_>>() {
+            let _ = cap.expand().to(&mut leave);
+        }
+    }
+    (enter, leave)
+}
+
+/// Returns the input terminal's configured editing and interrupt characters.
+pub fn readline_terminal_keys() -> Vec<(u8, Option<interfaces::InputFunction>)> {
+    use interfaces::InputFunction as F;
+    use nix::sys::termios::{SpecialCharacterIndices as C, tcgetattr};
+
+    let Ok(settings) = tcgetattr(std::io::stdin()) else {
+        return Vec::new();
+    };
+    let keys = [
+        (C::VINTR, None),
+        (C::VERASE, Some(F::BackwardDeleteChar)),
+        (C::VKILL, Some(F::UnixLineDiscard)),
+        #[cfg(not(any(target_os = "aix", target_os = "haiku")))]
+        (C::VWERASE, Some(F::UnixWordRubout)),
+        #[cfg(not(target_os = "haiku"))]
+        (C::VLNEXT, Some(F::QuotedInsert)),
+    ];
+    keys.into_iter()
+        .map(|(index, function)| (settings.control_chars[index as usize], function))
+        .filter(|(byte, _)| !matches!(byte, 0 | 255))
+        .collect()
+}
+
+/// Reads raw terminal bytes without buffering bytes that belong to a later read.
+pub fn read_stdin_bytes(buffer: &mut [u8]) -> std::io::Result<usize> {
+    Ok(nix::unistd::read(std::io::stdin(), buffer)?)
+}
+
+/// Returns the terminal's default active-region start and end sequences.
+pub fn readline_terminal_standout() -> (String, String) {
+    if let Ok(ti) = terminfo::Database::from_env() {
+        let ((), start) = key!(ti, (), cap::EnterStandoutMode<'_>);
+        let ((), end) = key!(ti, (), cap::ExitStandoutMode<'_>);
+        if let (Some(Ok(start)), Some(Ok(end))) = (start, end) {
+            return (
+                String::from_utf8_lossy(&start).into_owned(),
+                String::from_utf8_lossy(&end).into_owned(),
+            );
+        }
+    }
+    (String::new(), String::new())
+}
+
+/// Emits the terminal's visual bell, using the audible bell when it has no flash capability.
+pub fn flash_readline_terminal(output: &mut impl std::io::Write) -> std::io::Result<()> {
+    let flash = terminfo::Database::from_env().ok().and_then(|terminal| {
+        terminal
+            .get::<cap::FlashScreen<'_>>()?
+            .expand()
+            .to_vec()
+            .ok()
+    });
+    let Some(flash) = flash else {
+        output.write_all(b"\x07")?;
+        return output.flush();
+    };
+
+    // Terminfo encodes padding as $<milliseconds>. A visible bell may
+    // need the delay between the sequences that turn reverse video on and off.
+    let mut remaining = flash.as_slice();
+    while let Some(start) = remaining.windows(2).position(|bytes| bytes == b"$<") {
+        let after = &remaining[start + 2..];
+        let Some(end) = after.iter().position(|&byte| byte == b'>') else {
+            break;
+        };
+        output.write_all(&remaining[..start])?;
+        output.flush()?;
+        if let Some(delay) = std::str::from_utf8(&after[..end])
+            .ok()
+            .and_then(|value| value.trim_end_matches(['*', '/']).parse::<f64>().ok())
+            .and_then(|millis| {
+                std::time::Duration::try_from_secs_f64(millis.min(500.0) / 1_000.0).ok()
+            })
+        {
+            std::thread::sleep(delay);
+        }
+        remaining = &after[end + 1..];
+    }
+    output.write_all(remaining)?;
+    output.flush()
+}

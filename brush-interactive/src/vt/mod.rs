@@ -6,7 +6,7 @@
 mod completion_list;
 mod input_backend;
 mod keymap;
-mod keys;
+use crate::terminal_keys as keys;
 mod line_buffer;
 mod line_editor;
 mod line_reader;
