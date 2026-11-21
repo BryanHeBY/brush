@@ -57,14 +57,13 @@ impl reedline::Hinter for HistoryHinter {
         {
             shared.suggestion = Some(accepted);
         }
+        let recalled = shared
+            .history
+            .as_ref()
+            .is_some_and(|search| search.last.text == line);
+        shared.has_single_line_draft = !recalled && !line.is_empty() && !line.contains('\n');
         let selected = shared.suggestion.as_ref().filter(|hint| hint.draft == line);
-        if pos != line.len()
-            || line.is_empty()
-            || shared
-                .history
-                .as_ref()
-                .is_some_and(|search| search.last.text == line)
-        {
+        if pos != line.len() || line.is_empty() || recalled {
             if selected.is_none_or(|hint| !hint.suffix.is_empty()) {
                 shared.suggestion = None;
             }
@@ -304,6 +303,7 @@ pub(super) struct ReadlineSession {
     suggestion: Option<HistorySuggestion>,
     suggestion_after_accept: Option<HistorySuggestion>,
     navigate_suggestions: bool,
+    has_single_line_draft: bool,
     cycle: Option<CompletionCycle>,
     last_completion: Option<Buffer>,
     options: ReadlineOptions,
@@ -328,6 +328,7 @@ impl ReadlineSession {
         self.history = None;
         self.suggestion = None;
         self.suggestion_after_accept = None;
+        self.has_single_line_draft = false;
         self.cycle = None;
         self.last_completion = None;
         self.options = options;
@@ -491,10 +492,11 @@ impl ReadlineSession {
 
     pub(super) fn history_event(&self, event: &ReedlineEvent) -> Option<ReedlineEvent> {
         if self.navigate_suggestions
-            && self
-                .suggestion
-                .as_ref()
-                .is_some_and(|hint| !hint.suffix.is_empty())
+            && (self.has_single_line_draft
+                || self
+                    .suggestion
+                    .as_ref()
+                    .is_some_and(|hint| !hint.suffix.is_empty()))
         {
             match event {
                 ReedlineEvent::Up => return Some(Action::HistoryBackward.event()),
@@ -535,31 +537,48 @@ impl ReadlineSession {
         history: &history::History,
         action: Action,
     ) -> bool {
-        let Some(suggestion) = self.suggestion.as_mut().filter(|suggestion| {
-            self.navigate_suggestions
-                && current.cursor == current.text.len()
-                && suggestion.draft == current.text
-                && !suggestion.suffix.is_empty()
-        }) else {
+        if !self.navigate_suggestions
+            || current.text.is_empty()
+            || self
+                .history
+                .as_ref()
+                .is_some_and(|search| search.last == *current)
+        {
             return false;
-        };
+        }
         let backward = match action {
             Action::HistoryBackward => true,
             Action::HistoryForward => false,
             _ => return false,
         };
+        // A draft remains editable even when there is no hint at the cursor.
+        // Ordinary history recall could replace the text following the cursor.
+        if current.cursor != current.text.len() {
+            return true;
+        }
+        let selected = self
+            .suggestion
+            .as_ref()
+            .filter(|hint| hint.draft == current.text && !hint.suffix.is_empty());
+        if !backward && selected.is_none() {
+            return true;
+        }
         if let Some(mut entries) = history_matches(
             history,
-            &suggestion.draft,
-            Some(suggestion.id),
+            &current.text,
+            selected.map(|hint| hint.id),
             backward,
             self.options.search_ignore_case,
         ) && let Some((id, suffix)) = entries.find_map(|entry| {
-            let suffix = entry.command_line.get(suggestion.draft.len()..)?;
-            (!suffix.is_empty() && suffix != suggestion.suffix).then_some((entry.id, suffix))
+            let suffix = entry.command_line.get(current.text.len()..)?;
+            (!suffix.is_empty() && selected.is_none_or(|hint| suffix != hint.suffix))
+                .then_some((entry.id, suffix))
         }) {
-            suggestion.id = id;
-            suggestion.suffix = suffix.to_owned();
+            self.suggestion = Some(HistorySuggestion {
+                draft: current.text.clone(),
+                suffix: suffix.to_owned(),
+                id,
+            });
         }
         true
     }

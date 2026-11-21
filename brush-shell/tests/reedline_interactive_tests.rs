@@ -821,6 +821,62 @@ TAB: menu-complete
 
 #[cfg(target_os = "linux")]
 #[test]
+fn history_suggestion_arrows_preserve_the_whole_draft() -> anyhow::Result<()> {
+    const FRAME_END: &str = "\x1b[?2026l";
+    const HINT: &str = "\x1b[2;3m";
+    let omarchy_keys = r#"
+"\e[A": history-search-backward
+"\e[B": history-search-forward
+"#;
+    for inputrc in [omarchy_keys, ""] {
+        for_readline_shell_with_config(
+            inputrc,
+            Some("[ui]\nsyntax-highlighting = false\nhistory-suggestion-navigation = true\n"),
+            |shell| {
+                if shell.bash {
+                    return Ok(());
+                }
+                let draft = "echo  'alpha beta' ta";
+                shell.run_and_expect(&format!("{draft}r-older"), "alpha beta tar-older")?;
+                shell.run_and_expect(
+                    "echo  'alpha other' tar-unrelated",
+                    "alpha other tar-unrelated",
+                )?;
+                shell.run_and_expect(&format!("{draft}r-newer"), "alpha beta tar-newer")?;
+                shell.run_and_expect(draft, "alpha beta ta")?;
+                shell.expect(FRAME_END)?;
+
+                // The newest exact match has no suffix. Up must still preview
+                // the longer matches without recalling or changing the draft.
+                shell.session.send(draft)?;
+                shell.expect(draft)?;
+                shell.expect(FRAME_END)?;
+                for (key, suffix) in [
+                    ("\x1b[A", "r-newer"),
+                    ("\x1b[A", "r-older"),
+                    ("\x1b[B", "r-newer"),
+                ] {
+                    shell.session.send(key)?;
+                    let frame = shell.capture(FRAME_END)?;
+                    assert!(frame.contains(draft), "{frame:?}");
+                    assert!(frame.contains(&format!("{HINT}{suffix}")), "{frame:?}");
+                }
+                shell.run_and_expect("", "alpha beta ta")?;
+                shell.expect(FRAME_END)?;
+
+                // The text after the cursor belongs to the draft too.
+                shell.run_and_expect(
+                    "echo  'alpha beta' tar-X\x1b[D\x1b[A\x1b[BY",
+                    "alpha beta tar-YX",
+                )
+            },
+        )?;
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+#[test]
 fn history_suggestions_accept_and_highlight_through_the_next_word_boundary() -> anyhow::Result<()> {
     const FRAME_END: &str = "\x1b[?2026l";
     for_readline_shell_with_config(

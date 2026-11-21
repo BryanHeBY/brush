@@ -66,12 +66,13 @@ User interface settings.
 Syntax highlighting is supported by the `reedline` and `vt` input backends.
 The `--disable-color` flag also disables syntax highlighting.
 
-When a history suggestion is visible, `history-suggestion-navigation` lets Up and
-Down preview older or newer matches while leaving the typed line intact. Right
-accepts the displayed suggestion at the end of the line. In Emacs editing mode,
-Ctrl+Right accepts up to the start of the next word, including any separators
-crossed. When no suggestion is visible, Ctrl+Right moves the cursor by word,
-and Up and Down use their configured bindings.
+`history-suggestion-navigation` lets Up and Down preview older or newer
+history matches at the end of an input line. The entire draft is the prefix,
+including spaces, and stays editable even when there is no match. An empty
+line uses the configured history bindings. Right accepts the displayed
+suggestion. In Emacs editing mode, Ctrl+Right accepts up to the start of the
+next word, including any separators crossed, or moves by word when there is
+no suggestion.
 
 ### `[experimental]` Section
 
