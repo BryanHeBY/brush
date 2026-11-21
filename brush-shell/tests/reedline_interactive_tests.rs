@@ -867,6 +867,49 @@ fn history_suggestions_accept_and_highlight_through_the_next_word_boundary() -> 
 
 #[cfg(target_os = "linux")]
 #[test]
+fn history_suggestion_highlights_only_the_typed_prefix() -> anyhow::Result<()> {
+    const FRAME_END: &str = "\x1b[?2026l";
+    const BUILTIN_PREFIX: &str = "\x1b[1;32mec\x1b[0m";
+    const HINT: &str = "\x1b[2;3m";
+    for_readline_shell_with_config(
+        r#"
+"\e[A": history-search-backward
+"\e[B": history-search-forward
+"#,
+        Some("[ui]\nsyntax-highlighting = true\nhistory-suggestion-navigation = true\n"),
+        |shell| {
+            if shell.bash {
+                return Ok(());
+            }
+            shell.command(
+                "PATH=./missing; history -s 'echo saved'; history -s 'ec-missing other'",
+            )?;
+            shell.expect(FRAME_END)?;
+
+            for (keys, suffix, highlighted) in [
+                ("ec", "-missing other", false),
+                ("\x1b[A", "ho saved", true),
+                ("\x1b[B", "-missing other", false),
+                ("\x1b[A", "ho saved", true),
+            ] {
+                shell.session.send(keys)?;
+                let frame = shell.capture(&format!("{HINT}{suffix}"))?;
+                assert_eq!(frame.contains(BUILTIN_PREFIX), highlighted, "{frame:?}");
+                shell.expect(FRAME_END)?;
+            }
+
+            shell.session.send("\r")?;
+            let submitted = shell.capture("\x1b[?2004l")?;
+            assert!(!submitted.contains(BUILTIN_PREFIX), "{submitted:?}");
+            assert!(!submitted.contains(HINT), "{submitted:?}");
+            shell.expect("command not found: ec")?;
+            shell.prompt()
+        },
+    )
+}
+
+#[cfg(target_os = "linux")]
+#[test]
 fn forward_word_binding_partially_accepts_a_visible_suggestion() -> anyhow::Result<()> {
     const FRAME_END: &str = "\x1b[?2026l";
     for_readline_shell_with_config(

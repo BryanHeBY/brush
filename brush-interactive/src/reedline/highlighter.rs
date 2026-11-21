@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+
 use crate::styles::kind_to_style;
 use crate::{highlighting, refs};
 use nu_ansi_term::Style;
@@ -17,17 +19,35 @@ impl reedline::Highlighter for PlainTextHighlighter {
 }
 
 impl<SE: brush_core::ShellExtensions> reedline::Highlighter for ReedlineHighlighter<SE> {
-    #[expect(clippy::significant_drop_tightening)]
     fn highlight(&self, line: &str, cursor: usize) -> reedline::StyledText {
-        let shell = tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(self.shell.lock())
-        });
+        self.highlight_with_hint(line, cursor, None)
+    }
 
-        let highlighted = highlighting::highlight_command(shell.as_ref(), line, cursor);
+    fn highlight_with_hint(
+        &self,
+        line: &str,
+        cursor: usize,
+        hint: Option<&str>,
+    ) -> reedline::StyledText {
+        let context = hint.map_or(Cow::Borrowed(line), |hint| {
+            Cow::Owned(line.to_owned() + hint)
+        });
+        let highlighted = {
+            let shell = tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current().block_on(self.shell.lock())
+            });
+            highlighting::highlight_command(shell.as_ref(), &context, cursor)
+        };
 
         let mut styled = reedline::StyledText::new();
-        for (kind, text) in highlighted.iter() {
-            styled.push((kind_to_style(kind), text.to_owned()));
+        for span in highlighted
+            .spans()
+            .iter()
+            .take_while(|span| span.range.start < line.len())
+        {
+            if let Some(text) = line.get(span.range.start..span.range.end.min(line.len())) {
+                styled.push((kind_to_style(span.kind), text.to_owned()));
+            }
         }
 
         styled
