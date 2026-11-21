@@ -2,6 +2,7 @@ use brush_core::{
     interfaces::{self, InputFunction, Key, KeyAction, KeySequence, KeyStroke},
     trace_categories,
 };
+use crossterm::event::Event;
 use radix_trie::{Trie, TrieCommon as _};
 use std::{
     collections::{HashMap, HashSet},
@@ -46,12 +47,21 @@ impl MutableEditMode {
 
 impl reedline::EditMode for MutableEditMode {
     fn parse_event(&mut self, event: reedline::ReedlineRawEvent) -> reedline::ReedlineEvent {
+        use reedline::ReedlineEvent;
+
         let mut inner = tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(self.inner.lock())
         });
 
         let mut readline = self.readline.lock();
-        let event = readline.parse_event(event.into(), |event| {
+        let event = event.into();
+        if let Event::Key(key) = event
+            && readline.handle_listing_key(key)
+        {
+            return ReedlineEvent::Repaint;
+        }
+        let is_editing_input = matches!(event, Event::Key(_) | Event::Paste(_));
+        let event = readline.parse_event(event, |event| {
             event
                 .try_into()
                 .ok()
@@ -75,7 +85,14 @@ impl reedline::EditMode for MutableEditMode {
             .or_else(|| readline.history_event(&event))
             .unwrap_or(event);
         readline.remember_hint_acceptance(&event);
-        event
+        let cycles_completion = matches!(&event, ReedlineEvent::Multiple(events)
+            if matches!(Action::from_events(events),
+                Some(InputFunction::MenuComplete | InputFunction::MenuCompleteBackward)));
+        if is_editing_input && !cycles_completion && readline.dismiss_listing() {
+            ReedlineEvent::Multiple(vec![ReedlineEvent::Repaint, event])
+        } else {
+            event
+        }
     }
 
     fn next_replay_event(&mut self) -> Option<reedline::ReedlineRawEvent> {

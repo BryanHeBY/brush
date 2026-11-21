@@ -316,6 +316,14 @@ impl ReadlineSession {
         self.listing.print_message(message);
     }
 
+    pub(super) fn handle_listing_key(&mut self, key: KeyEvent) -> bool {
+        self.listing.handle_key(key)
+    }
+
+    pub(super) fn dismiss_listing(&mut self) -> bool {
+        self.listing.dismiss()
+    }
+
     pub(super) fn begin(&mut self, options: ReadlineOptions, utf8_locale: bool) {
         self.history = None;
         self.suggestion = None;
@@ -357,16 +365,13 @@ impl ReadlineSession {
     }
 
     pub(super) fn parse_event(
-        &mut self,
+        &self,
         event: Event,
         mut parse: impl FnMut(Event) -> ReedlineEvent,
     ) -> ReedlineEvent {
         let Event::Key(key) = event else {
             return parse(event);
         };
-        if self.listing.handle_key(key) {
-            return ReedlineEvent::None;
-        }
         let raw = super::terminal_input::raw_byte(key);
         if let KeyCode::Char(c) = key.code
             && raw.map_or_else(|| !c.is_ascii(), |byte| !byte.is_ascii())
@@ -637,6 +642,7 @@ impl ReadlineSession {
             return Some(cycle.advance(action));
         }
         self.cycle = None;
+        self.listing.dismiss();
 
         let values = completion::complete_async(shell, &current.text, current.cursor).await;
         if matches!(action, Action::ListCompletions) {
@@ -782,7 +788,21 @@ pub(super) fn install<SE: brush_core::ShellExtensions>(
         };
         editor = editor.with_menu(menu);
     }
-    editor.with_external_printer(ListingOutput(shared.clone()))
+    editor
+        .with_status_line(Box::new(ListingStatus(shared.clone())))
+        .with_external_printer(ListingOutput(shared.clone()))
+}
+
+struct ListingStatus(Session);
+
+impl reedline::StatusLine for ListingStatus {
+    fn status(&mut self, _: &str, _: usize, _: u16, _: bool) -> String {
+        self.0.lock().listing.status()
+    }
+
+    fn status_unavailable(&mut self) {
+        self.0.lock().listing.print_overflow();
+    }
 }
 
 struct ListingOutput(Session);

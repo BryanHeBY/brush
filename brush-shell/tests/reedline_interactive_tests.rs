@@ -997,11 +997,73 @@ fn readline_horizontal_scroll_and_bell_match_bash() -> anyhow::Result<()> {
 
 #[cfg(target_os = "linux")]
 #[test]
+fn readline_tab_lists_candidates_below_the_live_input() -> anyhow::Result<()> {
+    const FRAME_END: &str = "\x1b[?2026l";
+    for_readline_shell(
+        "set show-all-if-ambiguous on\n\
+         set show-all-if-unmodified on\n\
+         set page-completions off\n\
+         set completion-prefix-display-length 2\n\
+         set menu-complete-display-prefix on\n\
+         TAB: menu-complete\n",
+        |shell| {
+            shell.command("touch sample-alpha sample-beta")?;
+            if shell.bash {
+                shell.session.send("echo sam\t")?;
+                shell.expect("...alpha")?;
+                shell.session.send("\t")?;
+            } else {
+                shell.session.send("echo sam")?;
+                shell.expect("echo sam")?;
+                shell.expect(FRAME_END)?;
+
+                shell.session.send("\t")?;
+                let frame = shell.capture(FRAME_END)?;
+                let buffer = frame.find("echo sample-").context("completed prefix")?;
+                let below = frame.find("\x1b[2;1H").context("move below the input")?;
+                let first = frame
+                    .find("...alpha")
+                    .context("candidate in the same redraw")?;
+                let second = frame.find("...beta").context("second candidate")?;
+                assert!(
+                    buffer < below && below < first && first < second,
+                    "{frame:?}"
+                );
+
+                shell.session.send("\t")?;
+                let frame = shell.capture(FRAME_END)?;
+                assert!(frame.contains("echo sample-alpha "), "{frame:?}");
+                assert!(frame.contains("...alpha  ...beta"), "{frame:?}");
+            }
+            shell.run_and_expect("", "sample-alpha")
+        },
+    )
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn readline_completion_list_overflow_is_still_visible() -> anyhow::Result<()> {
+    for_readline_shell(
+        "set completion-display-width 0\n\
+         set page-completions off\n\
+         set show-all-if-unmodified on\n",
+        |shell| {
+            shell.command("touch item-{00..29}")?;
+            shell.session.send("echo item-\t")?;
+            shell.expect("item-00\r\nitem-01")?;
+            shell.expect("item-29")?;
+            shell.run_and_expect("", "item-")
+        },
+    )
+}
+
+#[cfg(target_os = "linux")]
+#[test]
 fn readline_completion_display_width_affects_default_tab() -> anyhow::Result<()> {
     for_readline_shell("set completion-display-width 0\n", |shell| {
         shell.command("touch sample-a sample-b sample-c")?;
         shell.session.send("echo sample-\t\t")?;
-        shell.expect("sample-a\r\nsample-b\r\nsample-c\r\n")?;
+        shell.expect("sample-a\r\nsample-b\r\nsample-c")?;
         shell.clear_line()
     })
 }

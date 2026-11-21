@@ -8,6 +8,7 @@ use unicode_width::UnicodeWidthStr;
 #[derive(Default)]
 pub(super) struct Listings {
     output: Vec<String>,
+    visible: Vec<String>,
     pending: Option<PendingListing>,
 }
 
@@ -20,6 +21,21 @@ struct PendingListing {
 impl Listings {
     pub(super) fn cancel(&mut self) {
         self.pending = None;
+        self.dismiss();
+    }
+
+    pub(super) fn dismiss(&mut self) -> bool {
+        let was_visible = !self.visible.is_empty();
+        self.visible.clear();
+        was_visible
+    }
+
+    pub(super) fn status(&self) -> String {
+        self.visible.join("\n")
+    }
+
+    pub(super) fn print_overflow(&mut self) {
+        self.output.append(&mut self.visible);
     }
 
     pub(super) fn print_message(&mut self, message: String) {
@@ -124,10 +140,10 @@ impl Listings {
             page_size,
         });
         if confirm {
-            self.output.push(format!(
+            self.visible = vec![format!(
                 "Display all {} possibilities? (y or n)",
                 candidates.len()
-            ));
+            )];
         } else {
             self.next_page(page_size);
         }
@@ -164,11 +180,12 @@ impl Listings {
         if let Some(pending) = &mut self.pending {
             pending.confirm = false;
             let count = count.min(pending.lines.len());
-            self.output.extend(pending.lines.drain(..count));
+            self.visible.clear();
+            self.visible.extend(pending.lines.drain(..count));
             if pending.lines.is_empty() {
                 self.pending = None;
             } else {
-                self.output.push("--More--".into());
+                self.visible.push("--More--".into());
             }
         }
     }
