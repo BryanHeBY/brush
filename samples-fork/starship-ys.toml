@@ -1,0 +1,65 @@
+# Two-line prompt inspired by Oh My Zsh's ys.
+add_newline = true
+command_timeout = 200
+format = '[#](bold blue) $username @ $hostname in $directory$git_branch$git_status$git_state$python$time$status$cmd_duration$line_break$character'
+
+[username]
+show_always = true
+style_user = 'cyan'
+style_root = 'black bg:yellow'
+format = '[$user]($style)'
+
+[hostname]
+ssh_only = false
+trim_at = '.'
+style = 'green'
+format = '[$hostname]($style)'
+
+[directory]
+truncation_length = 0
+truncate_to_repo = false
+style = 'bold yellow'
+read_only = ' ro'
+format = '[$path]($style)[$read_only]($read_only_style)'
+
+[git_branch]
+style = 'cyan'
+format = ' on [git](blue):[$branch]($style)'
+
+[git_status]
+style = 'red'
+format = '( [$all_status$ahead_behind]($style))'
+conflicted = '='
+modified = '!'
+staged = '+'
+untracked = '?'
+deleted = '-'
+renamed = '>'
+stashed = ''
+
+[git_state]
+style = 'yellow'
+format = ' [\($state( $progress_current/$progress_total)\)]($style)'
+
+[python]
+format = '( [$virtualenv](green))'
+detect_extensions = []
+detect_files = []
+detect_folders = []
+
+[time]
+disabled = false
+time_format = '%H:%M:%S'
+format = ' \[[$time](white)\]'
+
+[status]
+disabled = false
+format = ' [C:$status](red)'
+
+[cmd_duration]
+min_time = 1500
+format = ' [$duration](yellow)'
+
+[character]
+success_symbol = '[\$](bold red)'
+error_symbol = '[\$](bold red)'

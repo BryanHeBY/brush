@@ -1,0 +1,6 @@
+[ui]
+history-suggestion-navigation = false
+syntax-highlighting = true
+
+[experimental]
+terminal-shell-integration = true
