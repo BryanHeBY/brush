@@ -213,25 +213,31 @@ fn terminate_suspended_pipeline() -> anyhow::Result<()> {
     Ok(())
 }
 
-#[test_with::executable(sh, head, sort, ps)]
+#[test_with::executable(sh, head, sort, sleep, ps)]
 #[test]
 fn resume_pipeline_stopped_in_background() -> anyhow::Result<()> {
     let mut session = start_shell_session()?;
     session.expect_prompt()?;
     let shell_pid = session.exec_output("echo $$")?.trim().parse()?;
 
-    // In the background, `head` reads from the terminal, which stops the pipeline; `fg` must
-    // give it the terminal, and continue it, without its stopping again.
-    session.send_line("sh -c 'echo ready-$((1 + 1)) >&2; exec head -n 2' | sort")?;
+    // `fg` must give a job stopped in the background the terminal before it continues it, or
+    // the job would stop again on its first read from the terminal. `sleep` keeps `head` from
+    // reading until `fg`: a background read of the terminal on macOS can fail with EIO instead
+    // of stopping the reader (Linux stops it with SIGTTIN), so a reader that starts while the
+    // job is backgrounded can exit before there is a job left to resume.
+    session.send_line("sh -c 'echo ready-$((1 + 1)) >&2; sleep 3; exec head -n 2' | sort")?;
     session.expect("ready-2")?;
-    wait_for_state(shell_pid, "head", ProcessState::Sleeping)?;
+    wait_for_state(shell_pid, "sleep", ProcessState::Sleeping)?;
     session.suspend()?;
     session
         .expect_prompt()
         .context("Prompt after suspending pipeline")?;
-    session.send_line("bg")?;
+
+    // Resume it in the background and stop it again while it sleeps, so `fg` resumes a job
+    // stopped in the background. (`jobs` still reports it running until the shell notices.)
+    session.send_line("bg; kill -STOP %1")?;
     session.expect_prompt()?;
-    wait_for_state(shell_pid, "head", ProcessState::Stopped)?;
+    wait_for_state(shell_pid, "sleep", ProcessState::Stopped)?;
 
     // (`fg` shows the job's command once it has continued it.)
     session.send_line("fg")?;
