@@ -348,12 +348,14 @@ cases:
     additional_test_args: ["--input-backend=reedline"]
     min_oracle_version: "5.3"
     ignore_stderr: true
+    expected_exit_code: 0
     test_files:
       - path: "run.sh"
         contents: |
-          bind -x '"\C-t": printf "\"%s\"\n" café'
-          definition=$(bind -X)
-          printf '%s\n' "$definition"
-          bind -r '\C-t'
-          bind -x "$definition"
-          bind -X
+          bind -x '"\C-t": printf "\"%s\"\n" café' || exit
+          definition=$(bind -X) || exit
+          test -n "$definition" || exit 1
+          bind -r '\C-t' || exit
+          bind -x "$definition" || exit
+          # Readline has used different spellings of escaped non-ASCII bytes.
+          test "$(bind -X)" = "$definition"
