@@ -163,6 +163,37 @@ fn osc_command_markers_stay_paired_for_a_bound_command() -> anyhow::Result<()> {
     Ok(())
 }
 
+#[test]
+fn herdr_receives_the_shell_working_directory_before_the_prompt() -> anyhow::Result<()> {
+    let temp = tempfile::tempdir()?;
+    std::fs::create_dir(temp.path().join("space #%你好"))?;
+    let inputrc = temp.path().join("inputrc");
+    std::fs::write(&inputrc, "")?;
+    let mut session = start_reedline_session_with(|cmd| {
+        cmd.arg("--enable-terminal-integration")
+            .env("TERM_PROGRAM", "herdr")
+            .env("INPUTRC", &inputrc)
+            .env("HISTFILE", "")
+            .env_remove("PROMPT_COMMAND")
+            .current_dir(temp.path());
+    })?;
+
+    session.expect("\x1b]7;file:///")?;
+    expect_next_prompt(&mut session, 0)?;
+
+    session.send_line("cd -- 'space #%你好'")?;
+    session.expect("\x1b]7;file:///")?;
+    let directory = session.expect("\x1b\\")?;
+    assert!(
+        directory
+            .before()
+            .ends_with(b"/space%20%23%25%E4%BD%A0%E5%A5%BD"),
+        "{directory:?}"
+    );
+    expect_next_prompt(&mut session, 0)?;
+    Ok(())
+}
+
 /// A single unanswered cursor-position query (a transient terminal hiccup,
 /// e.g. right after a full-screen program hands the terminal back) must not
 /// terminate the shell; reedline asks again and uses the next answer.

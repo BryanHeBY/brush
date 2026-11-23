@@ -135,8 +135,9 @@ Emits standard terminal shell-integration escape sequences (semantic
 prompt and command boundary marking) that modern terminal emulators —
 including VS Code, iTerm2, WezTerm, and others — use to enable features
 like command navigation, exit-status display, and selective output
-copying. This is off by default to avoid emitting escape sequences in
-terminals that don't recognize them.
+copying. On Unix, brush also reports its current working directory
+before each prompt using OSC 7 in terminals that support it, including
+Herdr. This setting is off by default.
 
 Enable persistently with `terminal-shell-integration = true` under
 `[experimental]` in `config.toml`, or per-invocation with

@@ -166,6 +166,8 @@ pub enum KnownTerminal {
     Ghostty,
     /// GNOME Terminal
     GnomeTerminal,
+    /// Herdr
+    Herdr,
     /// iTerm2
     ITerm2,
     /// Kitty
@@ -236,6 +238,9 @@ pub(crate) fn get_terminal_info(env: &impl TerminalEnvironment) -> TerminalInfo 
                 info.supports_osc_110 = true;
                 info.supports_osc_111 = true;
                 info.supports_osc_112 = true;
+            }
+            KnownTerminal::Herdr => {
+                info.supports_osc_7 = true;
             }
             KnownTerminal::ITerm2 => {
                 // https://iterm2.com/documentation-escape-codes.html
@@ -349,6 +354,7 @@ fn try_detect_terminal_from_prog_var(env: &impl TerminalEnvironment) -> Option<K
         "appleterminal" => Some(KnownTerminal::AppleTerminal),
         "ghostty" => Some(KnownTerminal::Ghostty),
         "gnometerminal" => Some(KnownTerminal::GnomeTerminal),
+        "herdr" => Some(KnownTerminal::Herdr),
         "iterm" | "iterm2" | "itermapp" => Some(KnownTerminal::ITerm2),
         "kitty" => Some(KnownTerminal::Kitty),
         "konsole" => Some(KnownTerminal::Konsole),

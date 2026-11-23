@@ -249,6 +249,7 @@ impl<'a, IB: InputBackend, SE: brush_core::ShellExtensions> InteractiveShell<'a,
         };
 
         prompt.prompt = terminal_integration.decorate_prompt(prompt.prompt, shell.working_dir());
+        terminal_integration.on_pre_prompt(shell.working_dir())?;
 
         Ok(prompt)
     }

@@ -1,6 +1,7 @@
 use std::borrow::Cow;
 use std::fmt::Write;
 use std::io::Write as _;
+use std::path::Path;
 
 use crate::term_detection;
 
@@ -38,6 +39,16 @@ impl TerminalIntegration {
     // terminal wants to know about; each does what the event calls for. A terminal that
     // reports no support has nothing to say at any of them, so every handler is inert.
     //
+
+    /// Reports the working directory immediately before starting a new prompt.
+    pub fn on_pre_prompt(&self, cwd: &Path) -> std::io::Result<()> {
+        if self.term.supports_osc_7
+            && let Some(sequence) = osc_7_cwd(cwd)
+        {
+            Self::write(&sequence)?;
+        }
+        Ok(())
+    }
 
     /// Called after a command line has been read and before it runs.
     ///
@@ -85,7 +96,7 @@ impl TerminalIntegration {
     ///
     /// * `prompt` - The prompt as composed by the shell.
     /// * `working_dir` - The shell's current working directory.
-    pub fn decorate_prompt(&self, prompt: String, working_dir: &std::path::Path) -> String {
+    pub fn decorate_prompt(&self, prompt: String, working_dir: &Path) -> String {
         if !self.term.supports_osc_633 {
             return prompt;
         }
@@ -108,8 +119,8 @@ impl TerminalIntegration {
         }
     }
 
-    /// Returns the terminal escape sequence to report the current working directory.
-    pub fn report_cwd(&self, cwd: &std::path::Path) -> Cow<'_, str> {
+    /// Returns the OSC 633 sequence to report the current working directory.
+    pub fn report_cwd(&self, cwd: &Path) -> Cow<'_, str> {
         if self.term.supports_osc_633 {
             let escaped_cwd_str = osc_633_escape(cwd.to_string_lossy().as_ref());
             format!("\x1b]633;P;Cwd={escaped_cwd_str}\x1b\\").into()
@@ -198,6 +209,26 @@ impl TerminalIntegration {
     }
 }
 
+/// Encodes an absolute Unix path as a local file URI for OSC 7.
+fn osc_7_cwd(cwd: &Path) -> Option<String> {
+    let path = cwd.as_os_str().as_encoded_bytes();
+    if !path.starts_with(b"/") {
+        return None;
+    }
+
+    // Leave the authority empty so the terminal treats the directory as local.
+    let mut sequence = String::from("\x1b]7;file://");
+    for &byte in path {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b'.' | b'_' | b'~' | b'-') {
+            sequence.push(char::from(byte));
+        } else {
+            let _ = write!(sequence, "%{byte:02X}");
+        }
+    }
+    sequence.push_str("\x1b\\");
+    Some(sequence)
+}
+
 /// Escapes a string for safe inclusion in an OSC 633 escape sequence.
 /// Reference: <https://github.com/microsoft/vscode/blob/main/src/vs/workbench/contrib/terminal/common/scripts/shellIntegration-bash.sh>
 fn osc_633_escape(command: &str) -> String {
@@ -224,6 +255,18 @@ fn osc_633_escape(command: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn osc_7_encodes_path_bytes() {
+        use std::os::unix::ffi::OsStrExt;
+
+        let path = Path::new(std::ffi::OsStr::from_bytes(b"/tmp/\xFF-\x1B\x07"));
+        assert_eq!(
+            osc_7_cwd(path).as_deref(),
+            Some("\x1b]7;file:///tmp/%FF-%1B%07\x1b\\")
+        );
+    }
 
     #[test]
     fn osc_633_escape_basic() {
