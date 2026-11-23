@@ -213,22 +213,25 @@ fn terminate_suspended_pipeline() -> anyhow::Result<()> {
     Ok(())
 }
 
-#[test_with::executable(sh, head, sort)]
+#[test_with::executable(sh, head, sort, ps)]
 #[test]
 fn resume_pipeline_stopped_in_background() -> anyhow::Result<()> {
     let mut session = start_shell_session()?;
     session.expect_prompt()?;
+    let shell_pid = session.exec_output("echo $$")?.trim().parse()?;
 
     // In the background, `head` reads from the terminal, which stops the pipeline; `fg` must
     // give it the terminal, and continue it, without its stopping again.
     session.send_line("sh -c 'echo ready-$((1 + 1)) >&2; exec head -n 2' | sort")?;
     session.expect("ready-2")?;
+    wait_for_state(shell_pid, "head", ProcessState::Sleeping)?;
     session.suspend()?;
     session
         .expect_prompt()
         .context("Prompt after suspending pipeline")?;
     session.send_line("bg")?;
     session.expect_prompt()?;
+    wait_for_state(shell_pid, "head", ProcessState::Stopped)?;
 
     // (`fg` shows the job's command once it has continued it.)
     session.send_line("fg")?;
