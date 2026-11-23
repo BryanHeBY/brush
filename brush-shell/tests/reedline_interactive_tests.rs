@@ -36,6 +36,10 @@ const PROMPT: &str = "brush> ";
 const DSR_QUERY: &str = "\x1b[6n";
 const DSR_REPLY: &str = "\x1b[1;1R";
 
+// Reedline restores the cursor after drawing each input frame.
+#[cfg(target_os = "linux")]
+const FRAME_END: &str = "\x1b[?25h";
+
 /// OSC 633 markers bracketing a command: emitted before it runs, and after.
 const COMMAND_STARTED: &str = "\x1b]633;C";
 const COMMAND_FINISHED: &str = "\x1b]633;D";
@@ -721,7 +725,6 @@ fn readline_history_edits_match_bash() -> anyhow::Result<()> {
 #[cfg(target_os = "linux")]
 #[test]
 fn readline_history_arrows_keep_suggestions_separate() -> anyhow::Result<()> {
-    const FRAME_END: &str = "\x1b[?2026l";
     const HINT: &str = "\x1b[2m";
     for_readline_shell_with_config(
         r#"
@@ -797,7 +800,6 @@ fn readline_history_arrows_keep_suggestions_separate() -> anyhow::Result<()> {
 #[cfg(target_os = "linux")]
 #[test]
 fn history_suggestion_navigation_accepts_only_on_right() -> anyhow::Result<()> {
-    const FRAME_END: &str = "\x1b[?2026l";
     const HINT: &str = "\x1b[2m";
     let omarchy_keys = r#"
 "\e[A": history-search-backward
@@ -853,7 +855,6 @@ TAB: menu-complete
 #[cfg(target_os = "linux")]
 #[test]
 fn history_suggestion_arrows_preserve_the_whole_draft() -> anyhow::Result<()> {
-    const FRAME_END: &str = "\x1b[?2026l";
     const HINT: &str = "\x1b[2m";
     let omarchy_keys = r#"
 "\e[A": history-search-backward
@@ -909,7 +910,6 @@ fn history_suggestion_arrows_preserve_the_whole_draft() -> anyhow::Result<()> {
 #[cfg(target_os = "linux")]
 #[test]
 fn history_suggestions_accept_and_highlight_through_the_next_word_boundary() -> anyhow::Result<()> {
-    const FRAME_END: &str = "\x1b[?2026l";
     for_readline_shell_with_config(
         r#"
 "\e[A": history-search-backward
@@ -955,7 +955,6 @@ fn history_suggestions_accept_and_highlight_through_the_next_word_boundary() -> 
 #[cfg(target_os = "linux")]
 #[test]
 fn history_suggestion_highlights_only_the_typed_prefix() -> anyhow::Result<()> {
-    const FRAME_END: &str = "\x1b[?2026l";
     const BUILTIN_PREFIX: &str = "\x1b[1;32mec\x1b[0m";
     const HINT: &str = "\x1b[2m";
     for_readline_shell_with_config(
@@ -998,7 +997,6 @@ fn history_suggestion_highlights_only_the_typed_prefix() -> anyhow::Result<()> {
 #[cfg(target_os = "linux")]
 #[test]
 fn forward_word_binding_partially_accepts_a_visible_suggestion() -> anyhow::Result<()> {
-    const FRAME_END: &str = "\x1b[?2026l";
     for_readline_shell_with_config(
         r#"
 $if mode=emacs
@@ -1085,7 +1083,6 @@ fn readline_horizontal_scroll_and_bell_match_bash() -> anyhow::Result<()> {
 #[cfg(target_os = "linux")]
 #[test]
 fn readline_tab_lists_candidates_below_the_live_input() -> anyhow::Result<()> {
-    const FRAME_END: &str = "\x1b[?2026l";
     for_readline_shell(
         "set show-all-if-ambiguous on\n\
          set show-all-if-unmodified on\n\
@@ -1176,11 +1173,14 @@ struct ReadlinePty {
 #[cfg(target_os = "linux")]
 impl ReadlinePty {
     fn capture(&mut self, expected: &str) -> anyhow::Result<String> {
+        // With output processing enabled, the PTY can translate an explicit CRLF
+        // from the editor into CR-CR-LF. Both spellings render the same line break.
+        let processed_output = expected.replace("\r\n", "\r\r\n");
         let mut output = Vec::new();
         loop {
             let found = self
                 .session
-                .expect(expectrl::Any([expected, DSR_QUERY]))
+                .expect(expectrl::Any([expected, &processed_output, DSR_QUERY]))
                 .with_context(|| format!("bash={}, waiting for {expected:?}", self.bash))?;
             output.extend_from_slice(found.before());
             if found.get(0) == Some(DSR_QUERY.as_bytes()) {
