@@ -346,7 +346,8 @@ cases:
     args: ["run.sh"]
     removed_default_args: ["--input-backend=basic"]
     additional_test_args: ["--input-backend=reedline"]
-    min_oracle_version: "5.3"
+    # Some Bash builds change the serialized meta escapes on reload.
+    skip_oracle: true
     ignore_stderr: true
     expected_exit_code: 0
     test_files:
@@ -357,5 +358,4 @@ cases:
           test -n "$definition" || exit 1
           bind -r '\C-t' || exit
           bind -x "$definition" || exit
-          # Readline has used different spellings of escaped non-ASCII bytes.
           test "$(bind -X)" = "$definition"
