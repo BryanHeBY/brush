@@ -691,7 +691,7 @@ fn readline_history_edits_match_bash() -> anyhow::Result<()> {
 #[test]
 fn readline_history_arrows_keep_suggestions_separate() -> anyhow::Result<()> {
     const FRAME_END: &str = "\x1b[?2026l";
-    const HINT: &str = "\x1b[2;3m";
+    const HINT: &str = "\x1b[2m";
     for_readline_shell_with_config(
         r#"
 "\e[A": history-search-backward
@@ -767,7 +767,7 @@ fn readline_history_arrows_keep_suggestions_separate() -> anyhow::Result<()> {
 #[test]
 fn history_suggestion_navigation_accepts_only_on_right() -> anyhow::Result<()> {
     const FRAME_END: &str = "\x1b[?2026l";
-    const HINT: &str = "\x1b[2;3m";
+    const HINT: &str = "\x1b[2m";
     let omarchy_keys = r#"
 "\e[A": history-search-backward
 "\e[B": history-search-forward
@@ -823,7 +823,7 @@ TAB: menu-complete
 #[test]
 fn history_suggestion_arrows_preserve_the_whole_draft() -> anyhow::Result<()> {
     const FRAME_END: &str = "\x1b[?2026l";
-    const HINT: &str = "\x1b[2;3m";
+    const HINT: &str = "\x1b[2m";
     let omarchy_keys = r#"
 "\e[A": history-search-backward
 "\e[B": history-search-forward
@@ -894,7 +894,7 @@ fn history_suggestions_accept_and_highlight_through_the_next_word_boundary() -> 
             shell.expect(FRAME_END)?;
 
             shell.session.send("echo\x1b[A")?;
-            shell.expect("\x1b[2;3m 'alpha beta' /tmp/older")?;
+            shell.expect("\x1b[2m 'alpha beta' /tmp/older")?;
             shell.expect(FRAME_END)?;
 
             for (quoted, remaining) in [
@@ -910,7 +910,7 @@ fn history_suggestions_accept_and_highlight_through_the_next_word_boundary() -> 
                     "{frame:?}"
                 );
                 assert!(
-                    frame.contains(&format!("\x1b[2;3m{remaining}\x1b[0m")),
+                    frame.contains(&format!("\x1b[2m{remaining}\x1b[0m")),
                     "{frame:?}"
                 );
             }
@@ -926,7 +926,7 @@ fn history_suggestions_accept_and_highlight_through_the_next_word_boundary() -> 
 fn history_suggestion_highlights_only_the_typed_prefix() -> anyhow::Result<()> {
     const FRAME_END: &str = "\x1b[?2026l";
     const BUILTIN_PREFIX: &str = "\x1b[1;32mec\x1b[0m";
-    const HINT: &str = "\x1b[2;3m";
+    const HINT: &str = "\x1b[2m";
     for_readline_shell_with_config(
         r#"
 "\e[A": history-search-backward
@@ -983,10 +983,10 @@ $endif
             shell.expect(FRAME_END)?;
 
             shell.session.send("echo tar")?;
-            shell.expect("\x1b[2;3mget alpha")?;
+            shell.expect("\x1b[2mget alpha")?;
             shell.expect(FRAME_END)?;
             shell.session.send("\x1b[1;5C")?;
-            shell.expect("\x1b[2;3malpha")?;
+            shell.expect("\x1b[2malpha")?;
             shell.expect(FRAME_END)?;
             shell.run_and_expect("", "target")?;
 

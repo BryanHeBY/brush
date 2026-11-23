@@ -34,7 +34,7 @@ fn completion_menu_selected_match_text_style() -> Style {
 }
 
 fn history_hint_style() -> Style {
-    Style::new().italic().dimmed()
+    Style::new().dimmed()
 }
 
 struct TerminalModes(Vec<u8>);
@@ -392,7 +392,7 @@ mod tests {
 
         assert_eq!(style.foreground, None);
         assert_eq!(style.background, None);
-        assert!(style.is_italic);
+        assert!(!style.is_italic);
         assert!(style.is_dimmed);
     }
 
