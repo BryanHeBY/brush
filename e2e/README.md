@@ -23,8 +23,9 @@ cargo xtask test e2e --summary-output e2e.md # also write the run as a Markdown 
 
 CI passes `--docker-cache` to reuse each adapter's image layers across runs. The flag
 makes the build import and export GitHub Actions' cache (`type=gha`), which needs a
-buildx builder that can export cache; CI creates a `docker-container` one, while the
-default driver can't, so leave the flag off locally.
+buildx builder that can export cache and GitHub's cache URL and token in the
+environment; CI creates a `docker-container` builder and exports the runtime first,
+while the default driver can't, so leave the flag off locally.
 
 A run reports one line per adapter and a summary, read back from the JUnit
 each runner writes:

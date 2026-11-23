@@ -708,6 +708,11 @@ jobs:
       - name: Enable cargo cache
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
 
+      - name: Expose the runner's cache credentials to buildx
+        # A raw `docker buildx build`, unlike build-push-action, does not get GitHub's cache URL
+        # and token, which the gha cache backend needs; this exports them to later steps.
+        uses: crazy-max/ghaction-github-runtime@04d248b84655b509d8c44dc1d6f990c879747487 # v4.0.0
+
       - name: Set up Docker buildx for layer caching
         # The default docker driver can't export cache, so give buildx a container driver of
         # its own. `--bootstrap` fails here rather than on the first adapter build.
