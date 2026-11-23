@@ -4,13 +4,9 @@ on:
     paths-ignore:
       - "release-plz.toml"
   push:
-    paths-ignore:
-      - "docs/**"
-      - "**.md"
-      - "LICENSE"
-      - "release-plz.toml"
     branches:
       - main
+  workflow_dispatch:
 
 env:
   # Incremental compilation only pays off across repeated edit-build cycles.
@@ -421,6 +417,7 @@ jobs:
         run: echo "BASH_COMPLETION_PATH=${GITHUB_WORKSPACE}/bash-completion/bash_completion">>$GITHUB_ENV
 
       - name: Test
+        id: test
         env:
           VARIANT: ${{ matrix.variant }}
         run: |
@@ -430,6 +427,11 @@ jobs:
             args="${args} --coverage --coverage-output ./codecov-${VARIANT}.xml"
           fi
           cargo xtask test integration ${args}
+
+      # The workspace's nextest run does not include Rust documentation examples.
+      - name: Doctests
+        if: ${{ !cancelled() && !matrix.wasi_runtime && steps.test.outcome != 'skipped' }}
+        run: cargo test --workspace --doc --locked
 
       - name: "Upload test results"
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
