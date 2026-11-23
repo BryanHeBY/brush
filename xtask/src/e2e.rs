@@ -54,6 +54,12 @@ pub struct E2eArgs {
     #[clap(long, value_name = "PATH")]
     summary_output: Option<PathBuf>,
 
+    /// Import and export each adapter's Docker layer cache through GitHub Actions' cache
+    /// (`type=gha`), so a rebuild reuses layers from an earlier run. Requires a buildx builder
+    /// that can export cache (CI creates one); without it, layers are rebuilt every run.
+    #[clap(long)]
+    docker_cache: bool,
+
     /// Arguments passed to a single selected adapter, after `--`.
     #[clap(last = true, value_name = "ARG")]
     adapter_args: Vec<OsString>,
@@ -117,6 +123,7 @@ pub fn run(binary_args: &BinaryArgs, args: &E2eArgs, verbose: bool) -> Result<()
         shell: shell.as_deref(),
         adapter_args: &args.adapter_args,
         timeout: Duration::from_secs(args.timeout),
+        docker_cache: args.docker_cache,
         verbose,
     };
     let mut reports = Vec::new();
@@ -993,6 +1000,7 @@ struct E2eRun<'a> {
     shell: Option<&'a Path>,
     adapter_args: &'a [OsString],
     timeout: Duration,
+    docker_cache: bool,
     verbose: bool,
 }
 
@@ -1004,6 +1012,7 @@ fn run_e2e_adapter(run: &E2eRun<'_>, app: &str) -> Result<Option<String>> {
         shell,
         adapter_args,
         timeout,
+        docker_cache,
         verbose,
     } = *run;
     let image = format!("brush-e2e-{app}");
@@ -1016,18 +1025,29 @@ fn run_e2e_adapter(run: &E2eRun<'_>, app: &str) -> Result<Option<String>> {
         .with_context(|| format!("failed to resolve results directory: {}", results.display()))?;
 
     let mut build = ProcessCommand::new(docker);
-    build.arg("build");
+    if docker_cache {
+        // The docker driver can't export cache, so CI creates a docker-container builder.
+        // `--load` keeps the result in the local daemon for `docker run` below.
+        build.args(["buildx", "build", "--load"]);
+    } else {
+        build.arg("build");
+    }
     // A cold build takes minutes; `-q` keeps that noise out of the report, and `--verbose`
     // opts back into the progress output.
     if !verbose {
         build.arg("-q");
     }
-    build
-        .arg("-t")
-        .arg(&image)
-        .arg("-f")
-        .arg(&dockerfile)
-        .arg(e2e_dir);
+    build.arg("-t").arg(&image).arg("-f").arg(&dockerfile);
+    if docker_cache {
+        // One scope per adapter, so an image only ever reuses its own layers.
+        let scope = format!("brush-e2e-{app}");
+        build
+            .arg("--cache-from")
+            .arg(format!("type=gha,scope={scope}"))
+            .arg("--cache-to")
+            .arg(format!("type=gha,scope={scope}"));
+    }
+    build.arg(e2e_dir);
     let build = run_process(&mut build, timeout, verbose).context("container build failed")?;
     anyhow::ensure!(
         !build.timed_out,

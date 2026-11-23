@@ -708,10 +708,15 @@ jobs:
       - name: Enable cargo cache
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
 
+      - name: Set up Docker buildx for layer caching
+        # The default docker driver can't export cache, so give buildx a container driver of
+        # its own. `--bootstrap` fails here rather than on the first adapter build.
+        run: docker buildx create --name brush-e2e --driver docker-container --use --bootstrap
+
       - name: Run e2e suites
         run: |
           cargo xtask test --brush-path "${GITHUB_WORKSPACE}/binaries/brush" \
-              e2e --with bash-completion --timeout 600 \
+              e2e --with bash-completion --timeout 600 --docker-cache \
               --results-dir e2e-results --summary-output e2e-results/dashboard.md
 
       # The dashboard goes to the run page as well as the PR comment; failing adapters' logs go

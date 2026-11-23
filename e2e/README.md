@@ -17,8 +17,14 @@ cargo xtask test e2e fzf -- -n /ctrl_r/      # adapter-specific arguments
 cargo xtask test --release e2e fzf           # use target/release/brush
 cargo xtask test e2e --verbose fzf           # stream the runner's own output
 cargo xtask test e2e --timeout 600 fzf      # bound each adapter (default 1800s)
+cargo xtask test e2e --docker-cache fzf      # reuse image layers via GitHub Actions' cache
 cargo xtask test e2e --summary-output e2e.md # also write the run as a Markdown dashboard
 ```
+
+CI passes `--docker-cache` to reuse each adapter's image layers across runs. The flag
+makes the build import and export GitHub Actions' cache (`type=gha`), which needs a
+buildx builder that can export cache; CI creates a `docker-container` one, while the
+default driver can't, so leave the flag off locally.
 
 A run reports one line per adapter and a summary, read back from the JUnit
 each runner writes:
