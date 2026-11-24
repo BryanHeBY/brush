@@ -176,7 +176,9 @@ We're excited to see your first contribution! We don't bite, so we'd much rather
 Building brush needs nothing but [rustup](https://rustup.rs/). `rust-toolchain.toml`
 pins the exact toolchain, along with the `rustfmt` and `clippy` components, and
 rustup installs it automatically the first time you run `cargo` in the repository,
-so a fresh clone is ready to go after `cargo build`. The pin keeps formatting and
+so a fresh clone is ready to go after `cargo build`; there is no submodule to
+initialize. The Reedline fork is the in-tree `brush-reedline` package, excluded
+from the workspace so it can be published independently. The pin keeps formatting and
 lint results identical between your machine and CI; Dependabot bumps it as new
 Rust releases ship.
 

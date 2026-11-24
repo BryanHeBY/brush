@@ -588,13 +588,13 @@ dependencies = [
  "bon",
  "brush-core",
  "brush-parser",
+ "brush-reedline",
  "crossterm",
  "indexmap",
  "libc",
  "nu-ansi-term",
  "pretty_assertions",
  "radix_trie",
- "reedline",
  "thiserror 2.0.21",
  "tokio",
  "tracing",
@@ -626,6 +626,22 @@ dependencies = [
  "uuid",
  "winnow",
  "yaml_serde",
+]
+
+[[package]]
+name = "brush-reedline"
+version = "0.53.0"
+dependencies = [
+ "crossterm",
+ "crossterm_winapi",
+ "fd-lock",
+ "nu-ansi-term",
+ "rustix",
+ "serde",
+ "strip-ansi-escapes",
+ "strum",
+ "unicode-segmentation",
+ "unicode-width 0.2.3",
 ]
 
 [[package]]
@@ -3589,22 +3605,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ed2bf2547551a7053d6fdfafda3f938979645c44812fbfcda098faae3f1a362d"
 dependencies = [
  "bitflags 2.13.2",
-]
-
-[[package]]
-name = "reedline"
-version = "0.53.0"
-dependencies = [
- "crossterm",
- "crossterm_winapi",
- "fd-lock",
- "nu-ansi-term",
- "rustix",
- "serde",
- "strip-ansi-escapes",
- "strum",
- "unicode-segmentation",
- "unicode-width 0.2.3",
 ]
 
 [[package]]

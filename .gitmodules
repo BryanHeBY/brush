@@ -1,4 +1,0 @@
-[submodule "vendor/reedline"]
-	path = vendor/reedline
-	url = https://github.com/BryanHeBY/reedline.git
-	branch = main

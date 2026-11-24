@@ -17,10 +17,7 @@ members = [
     "xtask",
 ]
 default-members = ["brush-shell"]
-exclude = ["vendor/reedline"]
-
-[patch.crates-io]
-reedline = { path = "vendor/reedline" }
+exclude = ["brush-reedline"]
 
 [workspace.package]
 authors = ["reuben olinsky"]

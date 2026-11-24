@@ -16,6 +16,7 @@ pub(crate) const KEYSEQ_TIMEOUT: Duration = Duration::from_millis(500);
 const ESC: u8 = 0x1b;
 
 /// A key pressed at the terminal (or typed by a macro).
+#[cfg(feature = "vt")]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Keypress {
     /// The key, or `None` for a sequence this backend doesn't recognize.
@@ -130,6 +131,7 @@ impl KeyReader {
 }
 
 /// Decodes all the keys in `bytes` (e.g., a macro's), as if typed.
+#[cfg(feature = "vt")]
 pub(crate) fn decode_all(mut bytes: &[u8]) -> Vec<Keypress> {
     let mut keys = vec![];
     while let Some((stroke, len)) = decode(bytes, false) {
