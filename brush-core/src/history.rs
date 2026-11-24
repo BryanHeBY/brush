@@ -8,7 +8,10 @@ use std::{
 
 use crate::{
     error,
-    history_file::{atomic_write, lock_history_file, open_append_file, trim_history_entries},
+    history_file::{
+        atomic_write, lock_history_file, open_append_file, replace_contents, trim_history_bytes,
+        trim_history_file, write_in_place,
+    },
 };
 
 /// Represents a unique identifier for a history item.
@@ -359,10 +362,7 @@ impl History {
         let Some(start) = self.ensure_dirty_index() else {
             return Ok(());
         };
-        let mut file = open_append_file(
-            history_file_path.as_ref(),
-            self.write_mode == HistoryWriteMode::Portable,
-        )?;
+        let mut file = open_append_file(history_file_path.as_ref())?;
         let mut written = Vec::new();
         for (index, item) in self.items.iter().enumerate().skip(start) {
             if !item.dirty {
@@ -400,82 +400,73 @@ impl History {
         unsaved_items_only: bool,
         write_timestamps: bool,
     ) -> Result<(), error::Error> {
-        let _lock = (self.write_mode == HistoryWriteMode::Portable)
-            .then(|| lock_history_file(history_file_path.as_ref()))
-            .transpose()?;
+        use std::fmt::Write as _;
 
-        // Open the file. Portable mode creates new files privately; Bash mode honors umask.
-        let file = if append {
-            open_append_file(
-                history_file_path.as_ref(),
-                self.write_mode == HistoryWriteMode::Portable,
-            )?
-        } else {
-            let mut options = std::fs::OpenOptions::new();
-            options.write(true).truncate(true);
-            if self.write_mode == HistoryWriteMode::Portable {
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::OpenOptionsExt as _;
-                    options.mode(0o600);
-                }
-            }
-            options.create(true).open(history_file_path.as_ref())?
-        };
-        let mut file = std::io::BufWriter::new(file);
-
+        let path = history_file_path.as_ref();
         let first_dirty = unsaved_items_only
             .then(|| self.ensure_dirty_index())
             .flatten();
-        // Nothing to append? Don't walk a long history just to find no unsaved items.
         if unsaved_items_only && first_dirty.is_none() {
             return Ok(());
         }
+        let start = first_dirty.unwrap_or(0);
 
-        let start = if unsaved_items_only {
-            first_dirty.unwrap_or(0)
-        } else {
-            0
-        };
+        if !append {
+            let mut content = String::new();
+            for item in self
+                .items
+                .iter()
+                .skip(if unsaved_items_only { start } else { 0 })
+            {
+                if unsaved_items_only && !item.dirty {
+                    continue;
+                }
+                if write_timestamps && let Some(timestamp) = item.timestamp {
+                    writeln!(content, "#{}", timestamp.as_unix_seconds())?;
+                }
+                writeln!(content, "{}", item.command_line)?;
+            }
+            replace_contents(path, content.as_bytes(), self.write_mode)?;
+            self.mark_dirty_written(unsaved_items_only, start);
+            return Ok(());
+        }
 
-        let mut written = Vec::new();
-        for (index, item) in self.items.iter().enumerate().skip(start) {
+        let _lock = (self.write_mode == HistoryWriteMode::Portable)
+            .then(|| lock_history_file(path))
+            .transpose()?;
+        let mut file = std::io::BufWriter::new(open_append_file(path)?);
+        for item in self.items.iter().skip(start) {
             if unsaved_items_only && !item.dirty {
                 continue;
             }
-
             if write_timestamps && let Some(timestamp) = item.timestamp {
                 writeln!(file, "#{}", timestamp.as_unix_seconds())?;
             }
-
             writeln!(file, "{}", item.command_line)?;
-
-            if unsaved_items_only {
-                written.push(index);
-            }
         }
-
-        // Only once they're all written out, mark the items saved: if writing fails, they
-        // stay unsaved, so a later flush retries them.
         file.into_inner()
             .map_err(std::io::IntoInnerError::into_error)?;
-        for index in written {
+        self.mark_dirty_written(unsaved_items_only, start);
+        Ok(())
+    }
+
+    /// Marks the selected items saved after a successful write.
+    fn mark_dirty_written(&mut self, unsaved_items_only: bool, start: usize) {
+        if !unsaved_items_only {
+            return;
+        }
+        for index in start..self.items.len() {
             if let Some(item) = self.items.get_mut(index) {
                 item.dirty = false;
             }
         }
-        if unsaved_items_only {
-            self.first_dirty = None;
-        }
-
-        Ok(())
+        self.first_dirty = None;
     }
 
-    /// Saves history, applying `HISTFILESIZE`, under the history file's cross-process lock.
+    /// Saves history, applying `HISTFILESIZE`, using the configured write policy.
     ///
-    /// The file is rebuilt in a temporary file and atomically renamed, so a concurrent
-    /// appender cannot slip between reading the old entries and replacing them, and a failed
-    /// write leaves the previous file intact. Items are marked saved only after the rename.
+    /// Portable mode rebuilds the file through a private temporary file and an atomic rename.
+    /// Bash mode writes in place without a lock or temporary copy.
     pub fn save_with_limit(
         &mut self,
         history_file_path: impl AsRef<Path>,
@@ -490,211 +481,72 @@ impl History {
         if self.items.is_empty() && !path.exists() {
             return Ok(());
         }
-        if self.write_mode == HistoryWriteMode::Bash {
-            return self.save_with_limit_in_place(
-                path,
-                append,
-                unsaved_items_only,
-                write_timestamps,
-                max_items,
-            );
-        }
-        let _lock = lock_history_file(path)?;
 
-        let first_dirty = unsaved_items_only
-            .then(|| self.ensure_dirty_index())
-            .flatten();
-
-        // Appending is the common exit path. Write in place so an unreadable or non-UTF-8
-        // history file is preserved byte-for-byte instead of being replaced by an empty
-        // rewrite. It also keeps symlinks and permissions intact.
-        if append && unsaved_items_only && max_items.is_none() {
-            self.append_unsaved(path, write_timestamps)?;
-            return Ok(());
-        }
-
-        let existing = if append {
-            match std::fs::read_to_string(path) {
-                Ok(existing) => existing,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
-                Err(error) => return Err(error.into()),
-            }
-        } else {
-            String::new()
-        };
-        let start = if unsaved_items_only {
-            first_dirty.unwrap_or(0)
-        } else {
-            0
-        };
-
-        let mut content = existing;
-        let mut written = Vec::new();
-        for (index, item) in self.items.iter().enumerate().skip(start) {
-            if unsaved_items_only && !item.dirty {
-                continue;
-            }
-            if write_timestamps && let Some(timestamp) = item.timestamp {
-                writeln!(content, "#{}", timestamp.as_unix_seconds())?;
-            }
-            writeln!(content, "{}", item.command_line)?;
-            if unsaved_items_only {
-                written.push(index);
-            }
-        }
-
-        if let Some(max_items) = max_items {
-            content = trim_history_entries(&content, max_items);
-        }
-
-        atomic_write(path, content.as_bytes())?;
-
-        for index in written {
-            if let Some(item) = self.items.get_mut(index) {
-                item.dirty = false;
-            }
-        }
-        if unsaved_items_only {
-            self.first_dirty = None;
-        }
-
-        Ok(())
-    }
-
-    /// Bash-style save: append or truncate the target in place, without locking or a copy.
-    fn save_with_limit_in_place(
-        &mut self,
-        path: &Path,
-        append: bool,
-        unsaved_items_only: bool,
-        write_timestamps: bool,
-        max_items: Option<usize>,
-    ) -> Result<(), error::Error> {
-        use std::fmt::Write as _;
-
-        if self.items.is_empty() && !path.exists() {
-            return Ok(());
-        }
         let first_dirty = unsaved_items_only
             .then(|| self.ensure_dirty_index())
             .flatten();
         if append && unsaved_items_only && first_dirty.is_none() && max_items.is_none() {
             return Ok(());
         }
+
+        let _lock = (self.write_mode == HistoryWriteMode::Portable)
+            .then(|| lock_history_file(path))
+            .transpose()?;
+
+        // Appending without a file limit preserves an unreadable or non-UTF-8 history file
+        // byte-for-byte instead of rebuilding it.
         if append && unsaved_items_only && max_items.is_none() {
             self.append_unsaved(path, write_timestamps)?;
             return Ok(());
         }
 
-        let existing = if append {
-            match std::fs::read_to_string(path) {
+        let mut content = if append {
+            match std::fs::read(path) {
                 Ok(existing) => existing,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
                 Err(error) => return Err(error.into()),
             }
         } else {
-            String::new()
+            Vec::new()
         };
-        let start = if unsaved_items_only {
-            first_dirty.unwrap_or(0)
-        } else {
-            0
-        };
-        let mut content = existing;
-        let mut written = Vec::new();
-        for (index, item) in self.items.iter().enumerate().skip(start) {
+        let start = first_dirty.unwrap_or(0);
+        let mut new_content = String::new();
+        for item in self
+            .items
+            .iter()
+            .skip(if unsaved_items_only { start } else { 0 })
+        {
             if unsaved_items_only && !item.dirty {
                 continue;
             }
             if write_timestamps && let Some(timestamp) = item.timestamp {
-                writeln!(content, "#{}", timestamp.as_unix_seconds())?;
+                writeln!(new_content, "#{}", timestamp.as_unix_seconds())?;
             }
-            writeln!(content, "{}", item.command_line)?;
-            if unsaved_items_only {
-                written.push(index);
-            }
+            writeln!(new_content, "{}", item.command_line)?;
         }
+        content.extend_from_slice(new_content.as_bytes());
         if let Some(max_items) = max_items {
-            content = trim_history_entries(&content, max_items);
+            content = trim_history_bytes(&content, max_items);
         }
 
-        let mut file = std::fs::OpenOptions::new()
-            .create(true)
-            .truncate(true)
-            .write(true)
-            .open(path)?;
-        file.write_all(content.as_bytes())?;
-        file.flush()?;
+        if self.write_mode == HistoryWriteMode::Portable {
+            atomic_write(path, &content)?;
+        } else {
+            write_in_place(path, &content)?;
+        }
 
-        for index in written {
-            if let Some(item) = self.items.get_mut(index) {
-                item.dirty = false;
-            }
-        }
-        if unsaved_items_only {
-            self.first_dirty = None;
-        }
+        self.mark_dirty_written(unsaved_items_only, start);
         self.retry.clear();
         Ok(())
     }
 
-    /// Trims the backing file to its last `max_items` lines.
-    ///
-    /// `HISTFILESIZE` counts entries, but a history file can also contain timestamp lines; a
-    /// later format pass will group them. Until then this keeps the last lines, which matches
-    /// bash for files without timestamps and never drops the newest entries.
+    /// Trims the backing file to its last `max_items` entries.
     pub fn truncate_file(
         &self,
         history_file_path: impl AsRef<Path>,
         max_items: usize,
     ) -> Result<(), error::Error> {
-        let path = history_file_path.as_ref();
-        let _lock = (self.write_mode == HistoryWriteMode::Portable)
-            .then(|| lock_history_file(path))
-            .transpose()?;
-        let Ok(contents) = std::fs::read_to_string(path) else {
-            return Ok(());
-        };
-        let lines: Vec<&str> = contents.lines().collect();
-
-        // With timestamps, a `#<digits>` line starts an entry and the lines after it belong to
-        // that entry (a multi-line command); without them, each line is an entry, as bash reads
-        // an untimed file. Keep the newest entries, not merely the newest lines.
-        let timed = lines.iter().any(|line| {
-            line.strip_prefix('#')
-                .is_some_and(|rest| rest.trim().parse::<i64>().is_ok())
-        });
-        let mut entries: Vec<Vec<&str>> = Vec::new();
-        if timed {
-            for line in lines {
-                let is_timestamp = line
-                    .strip_prefix('#')
-                    .is_some_and(|rest| rest.trim().parse::<i64>().is_ok());
-                if is_timestamp || entries.is_empty() {
-                    entries.push(vec![line]);
-                } else if let Some(entry) = entries.last_mut() {
-                    entry.push(line);
-                }
-            }
-        } else {
-            entries.extend(lines.into_iter().map(|line| vec![line]));
-        }
-
-        if entries.len() <= max_items {
-            return Ok(());
-        }
-
-        let mut trimmed = entries[entries.len() - max_items..]
-            .iter()
-            .flatten()
-            .copied()
-            .collect::<Vec<_>>()
-            .join("\n");
-        if !trimmed.is_empty() {
-            trimmed.push('\n');
-        }
-        std::fs::write(path, trimmed)?;
-        Ok(())
+        trim_history_file(history_file_path.as_ref(), max_items, self.write_mode)
     }
 
     /// Appends entries from `reader`, skipping ones already present (matched by timestamp and
@@ -1433,6 +1285,55 @@ mod tests {
             std::fs::metadata(lock_path(&path))?.permissions().mode() & 0o777,
             0o600
         );
+
+        let bash_path = dir.path().join("bash-history");
+        let mut bash = History::default();
+        bash.set_write_mode(HistoryWriteMode::Bash);
+        bash.add(Item::new("private-bash-entry"))?;
+        bash.save_with_limit(&bash_path, true, true, false, None)?;
+        assert_eq!(
+            std::fs::metadata(&bash_path)?.permissions().mode() & 0o777,
+            0o600
+        );
+        assert!(!lock_path(&bash_path).exists());
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn portable_flush_and_trim_replace_atomically() -> Result<(), error::Error> {
+        use std::os::unix::fs::MetadataExt as _;
+
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("history");
+        std::fs::write(&path, "old\n")?;
+        let inode = std::fs::metadata(&path)?.ino();
+        let mut history = History::default();
+        history.add(Item::new("flushed"))?;
+        history.flush(&path, false, false, false)?;
+        assert_ne!(std::fs::metadata(&path)?.ino(), inode);
+        assert_eq!(std::fs::read_to_string(&path)?, "flushed\n");
+
+        std::fs::write(&path, ": one\n: two\n: three\n")?;
+        let inode = std::fs::metadata(&path)?.ino();
+        History::default().truncate_file(&path, 1)?;
+        assert_ne!(std::fs::metadata(&path)?.ino(), inode);
+        assert_eq!(std::fs::read_to_string(&path)?, ": three\n");
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn failed_portable_rewrite_preserves_the_original() -> Result<(), error::Error> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("history");
+        std::fs::write(&path, "original\n")?;
+        std::fs::create_dir_all(lock_path(&path))?;
+
+        let mut history = History::default();
+        history.add(Item::new("replacement"))?;
+        assert!(history.flush(&path, false, false, false).is_err());
+        assert_eq!(std::fs::read_to_string(&path)?, "original\n");
         Ok(())
     }
 
@@ -1583,17 +1484,37 @@ mod tests {
         assert!(contents.starts_with(original), "{contents:?}");
         assert!(contents.ends_with(b"appended\n"), "{contents:?}");
 
-        // A size-limited save must not treat the read failure as an empty file.
+        // A size-limited save must decode record boundaries as bytes, not reject the file.
         let original = std::fs::read(&path)?;
         let mut history = History::default();
-        history.add(Item::new("must-not-write"))?;
-        assert!(
-            history
-                .save_with_limit(&path, true, true, false, Some(1))
-                .is_err()
-        );
-        assert_eq!(std::fs::read(&path)?, original);
-        assert!(history.first_dirty.is_some());
+        history.add(Item::new("with-limit"))?;
+        history.save_with_limit(&path, true, true, false, Some(10))?;
+        let contents = std::fs::read(&path)?;
+        assert!(contents.starts_with(&original), "{contents:?}");
+        assert!(contents.ends_with(b"with-limit\n"), "{contents:?}");
+        Ok(())
+    }
+
+    #[test]
+    fn limited_append_preserves_non_utf8_in_both_modes() -> Result<(), error::Error> {
+        for mode in [HistoryWriteMode::Portable, HistoryWriteMode::Bash] {
+            let dir = tempfile::tempdir()?;
+            let path = dir.path().join("history");
+            let original = b"kept\n\xff\xfe\n";
+            std::fs::write(&path, original)?;
+
+            let mut history = History::default();
+            history.set_write_mode(mode);
+            history.add(Item::new("appended-with-limit"))?;
+            history.save_with_limit(&path, true, true, false, Some(10))?;
+
+            let contents = std::fs::read(&path)?;
+            assert!(contents.starts_with(original), "{mode:?}: {contents:?}");
+            assert!(
+                contents.ends_with(b"appended-with-limit\n"),
+                "{mode:?}: {contents:?}"
+            );
+        }
         Ok(())
     }
 

@@ -934,6 +934,72 @@ cases:
       : new
       unset HISTFILE
 
+  - name: "cmdhist keeps separate commands inside a block"
+    args: ["-o", "history"]
+    env:
+      HISTFILE: "history-file.txt"
+    stdin: |
+      if true; then
+      printf '%s\n' FIRST
+      printf '%s\n' SECOND
+      fi
+      fc -s 'if true'
+      unset HISTFILE
+
+  - name: "startup keeps history when HISTFILESIZE explicit negative HISTFILESIZE disables trimming"
+    args: ["-i"]
+    ignore_stderr: true # Ignore job control warnings from interactive shell without a tty
+    env:
+      HISTFILE: "history-file.txt"
+      HISTSIZE: "2"
+      HISTFILESIZE: "-1"
+    test_files:
+      - path: "history-file.txt"
+        contents: |
+          : old1
+          : old2
+          : old3
+          : old4
+          : old5
+    stdin: |
+      unset HISTFILE
+
+  - name: "startup keeps history when HISTFILESIZE explicit empty HISTFILESIZE disables trimming"
+    args: ["-i"]
+    ignore_stderr: true # Ignore job control warnings from interactive shell without a tty
+    env:
+      HISTFILE: "history-file.txt"
+      HISTSIZE: "2"
+      HISTFILESIZE: ""
+    test_files:
+      - path: "history-file.txt"
+        contents: |
+          : old1
+          : old2
+          : old3
+          : old4
+          : old5
+    stdin: |
+      unset HISTFILE
+
+  - name: "startup keeps history when HISTFILESIZE explicit non-numeric HISTFILESIZE disables trimming"
+    args: ["-i"]
+    ignore_stderr: true # Ignore job control warnings from interactive shell without a tty
+    env:
+      HISTFILE: "history-file.txt"
+      HISTSIZE: "2"
+      HISTFILESIZE: "not-a-number"
+    test_files:
+      - path: "history-file.txt"
+        contents: |
+          : old1
+          : old2
+          : old3
+          : old4
+          : old5
+    stdin: |
+      unset HISTFILE
+
   - name: "History expansion"
     known_failure: true # brush doesn't implement history expansion
     ignore_stderr: true # Ignore job control warnings from interactive shell without a tty

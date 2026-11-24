@@ -115,20 +115,24 @@ pub(crate) fn file_identity(metadata: &std::fs::Metadata) -> Identity {
     }
 }
 
-/// Keeps the last `max_items` entries in a history file's contents.
-pub(crate) fn trim_history_entries(contents: &str, max_items: usize) -> String {
-    let lines: Vec<&str> = contents.lines().collect();
-    let timed = lines.iter().any(|line| {
-        line.strip_prefix('#')
+/// Keeps the last `max_items` entries in a history file's raw bytes.
+///
+/// Timestamp lines (`#<digits>`) start entries; otherwise each newline-terminated line is an
+/// entry. The returned bytes preserve the original encoding, line endings, and timestamp lines.
+pub(crate) fn trim_history_bytes(contents: &[u8], max_items: usize) -> Vec<u8> {
+    let lines: Vec<&[u8]> = contents.split_inclusive(|byte| *byte == b'\n').collect();
+    let is_timestamp = |line: &[u8]| {
+        let line = line.strip_suffix(b"\n").unwrap_or(line);
+        line.strip_prefix(b"#")
+            .and_then(|rest| std::str::from_utf8(rest).ok())
             .is_some_and(|rest| rest.trim().parse::<i64>().is_ok())
-    });
-    let mut entries: Vec<Vec<&str>> = Vec::new();
+    };
+    let timed = lines.iter().any(|line| is_timestamp(line));
+
+    let mut entries: Vec<Vec<&[u8]>> = Vec::new();
     if timed {
         for line in lines {
-            let is_timestamp = line
-                .strip_prefix('#')
-                .is_some_and(|rest| rest.trim().parse::<i64>().is_ok());
-            if is_timestamp || entries.is_empty() {
+            if is_timestamp(line) || entries.is_empty() {
                 entries.push(vec![line]);
             } else if let Some(entry) = entries.last_mut() {
                 entry.push(line);
@@ -139,20 +143,67 @@ pub(crate) fn trim_history_entries(contents: &str, max_items: usize) -> String {
     }
 
     if entries.len() <= max_items {
-        return contents.to_owned();
+        return contents.to_vec();
     }
     if max_items == 0 {
-        return String::new();
+        return Vec::new();
     }
 
-    let mut trimmed = entries[entries.len() - max_items..]
+    entries[entries.len() - max_items..]
         .iter()
         .flatten()
-        .copied()
-        .collect::<Vec<_>>()
-        .join("\n");
-    trimmed.push('\n');
-    trimmed
+        .flat_map(|line| line.iter().copied())
+        .collect()
+}
+
+/// Reads a history file, trims it by raw record boundaries, and writes it back with the selected
+/// transaction policy. No UTF-8 decoding is performed.
+pub(crate) fn trim_history_file(
+    path: &Path,
+    max_items: usize,
+    mode: crate::history::HistoryWriteMode,
+) -> Result<(), error::Error> {
+    let contents = match std::fs::read(path) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    let trimmed = trim_history_bytes(&contents, max_items);
+    if trimmed == contents {
+        return Ok(());
+    }
+    replace_contents(path, &trimmed, mode)
+}
+
+/// Replaces a history file with `contents` using the configured write policy.
+pub(crate) fn replace_contents(
+    path: &Path,
+    contents: &[u8],
+    mode: crate::history::HistoryWriteMode,
+) -> Result<(), error::Error> {
+    if mode == crate::history::HistoryWriteMode::Portable {
+        let _lock = lock_history_file(path)?;
+        atomic_write(path, contents)
+    } else {
+        write_in_place(path, contents)
+    }
+}
+
+/// Writes `contents` to the target in place, creating a new file privately.
+pub(crate) fn write_in_place(path: &Path, contents: &[u8]) -> Result<(), error::Error> {
+    let mut file = match crate::sys::fs::create_new_private_file(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            std::fs::OpenOptions::new()
+                .write(true)
+                .truncate(true)
+                .open(path)?
+        }
+        Err(error) => return Err(error.into()),
+    };
+    file.write_all(contents)?;
+    file.flush()?;
+    Ok(())
 }
 
 /// Locks the history file used at `path`.
@@ -196,15 +247,8 @@ pub(crate) fn lock_path(path: &Path) -> PathBuf {
     target.with_file_name(lock_name)
 }
 
-/// Opens a history file for appending. Portable mode creates a new file privately (0600 on
-/// Unix); Bash mode uses the process umask.
-pub(crate) fn open_append_file(path: &Path, private: bool) -> Result<std::fs::File, error::Error> {
-    if !private {
-        return Ok(std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)?);
-    }
+/// Opens a history file for appending, creating a new file privately (0600 on Unix).
+pub(crate) fn open_append_file(path: &Path) -> Result<std::fs::File, error::Error> {
     match crate::sys::fs::create_new_private_file(path) {
         Ok(file) => Ok(file),
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {

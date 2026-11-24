@@ -19,9 +19,9 @@ use crate::{
 /// Joins the lines of a multi-line command the way bash's `cmdhist` does.
 ///
 /// Newlines inside quotes and here-document bodies are part of the command and are kept as
-/// written. Elsewhere, a line that ends a simple command is followed by `"; "`, a line ending
-/// at a keyword or a continuation by a space, and a backslash-newline is removed. Leading
-/// whitespace on the next line is kept.
+/// written. Elsewhere the entire command is parsed after trying `"; "` and then a space at each
+/// newline. This is stricter than inspecting the preceding word: it keeps two commands inside a
+/// block separate, while still leaving a space after `then`, `do`, or a trailing pipe.
 fn join_multiline_command(command: &str, parser_options: &brush_parser::ParserOptions) -> String {
     if command.contains("<<") && !command.contains("<<<") {
         // Bash keeps a trailing newline as part of a here-document history entry.
@@ -31,68 +31,56 @@ fn join_multiline_command(command: &str, parser_options: &brush_parser::ParserOp
         return command.to_owned();
     }
 
-    let mut joined = String::new();
-    let mut continued = false;
-
-    for (index, line) in command.lines().enumerate() {
-        if index > 0 && !continued {
-            let Some(separator) = history_line_separator(&joined, line, parser_options) else {
-                return command.to_owned();
-            };
-            joined.push_str(separator);
-        }
-
-        if let Some(without_backslash) = line.strip_suffix('\\') {
-            joined.push_str(without_backslash);
-            continued = true;
-        } else {
-            joined.push_str(line);
-            continued = false;
-        }
+    let lines: Vec<&str> = command.lines().collect();
+    if lines.len() <= 1 {
+        return command.to_owned();
     }
 
-    joined
-}
-
-/// Chooses the separator for a newline in a multi-line command, using the parser to decide
-/// whether the accumulated text is already a complete program.
-///
-/// A complete program gets `"; "` so the next line remains a separate command. An incomplete
-/// construct gets a space, unless adding `"; "` makes the next line complete (for example
-/// just before `fi` or `done`). Unparseable text keeps its original newlines.
-fn history_line_separator(
-    joined: &str,
-    next_line: &str,
-    parser_options: &brush_parser::ParserOptions,
-) -> Option<&'static str> {
     let parse = |source: &str| {
         brush_parser::Parser::new(source.as_bytes(), parser_options)
             .parse_program()
             .map(|_| ())
     };
+    let mut separators = vec!["\n"; lines.len() - 1];
 
-    match parse(joined) {
-        Ok(()) => {
-            let tokens = brush_parser::tokenize_str_with_options(
-                joined,
-                &parser_options.tokenizer_options(),
-            )
-            .ok()?;
-            match tokens.last() {
-                Some(brush_parser::Token::Operator(_, _)) => Some(" "),
-                _ => Some("; "),
+    for boundary in 0..separators.len() {
+        if lines[boundary].ends_with('\\') {
+            separators[boundary] = "";
+            continue;
+        }
+
+        separators[boundary] = "; ";
+        if parse(&render_history_lines(&lines, &separators)).is_err() {
+            separators[boundary] = " ";
+            if parse(&render_history_lines(&lines, &separators)).is_err() {
+                separators[boundary] = "\n";
             }
         }
-        Err(brush_parser::ParseError::ParsingAtEndOfInput) => {
-            let candidate = format!("{joined}; {next_line}");
-            if parse(&candidate).is_ok() {
-                Some("; ")
-            } else {
-                Some(" ")
-            }
-        }
-        Err(_) => None,
     }
+
+    let joined = render_history_lines(&lines, &separators);
+    if parse(&joined).is_ok() {
+        joined
+    } else {
+        command.to_owned()
+    }
+}
+
+/// Renders source lines with the chosen history separators, removing backslash-newline
+/// continuations.
+fn render_history_lines(lines: &[&str], separators: &[&str]) -> String {
+    let mut rendered = String::new();
+    for (index, line) in lines.iter().enumerate() {
+        if index > 0 {
+            rendered.push_str(separators[index - 1]);
+        }
+        if let Some(without_backslash) = line.strip_suffix('\\') {
+            rendered.push_str(without_backslash);
+        } else {
+            rendered.push_str(line);
+        }
+    }
+    rendered
 }
 
 /// Returns true if `command` contains a `#` outside quotes. A newline after an inline
@@ -189,6 +177,17 @@ fn split_ignore_patterns(ignore: &str) -> Vec<String> {
     patterns
 }
 
+/// A history size variable's explicit state.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum HistoryLimit {
+    /// The variable was not set; a default may apply.
+    Unset,
+    /// The variable was set to an empty, non-numeric, or negative value.
+    Unlimited,
+    /// The variable was set to a non-negative integer.
+    Limited(usize),
+}
+
 impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
     pub(super) fn load_history(&self) -> Result<Option<crate::history::History>, error::Error> {
         const MAX_FILE_SIZE_FOR_HISTORY_IMPORT: u64 = 1024 * 1024 * 1024; // 1 GiB
@@ -226,8 +225,12 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
             history.retain_last(limit);
         }
         history.set_write_mode(self.history_write_mode);
-        if let Some(limit) = self.history_file_size_limit() {
-            history.truncate_file(&history_path, limit)?;
+        if let Some(limit) = self.history_file_size_limit()
+            && let Err(error) = history.truncate_file(&history_path, limit)
+        {
+            // Reading succeeded; a read-only directory or unavailable lock must not discard
+            // the in-memory history. The file is left untouched for a later writable session.
+            tracing::warn!("could not trim history file at startup: {error}");
         }
         Ok(Some(history))
     }
@@ -236,26 +239,41 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
     /// `HISTSIZE` takes precedence; an inputrc `history-size` still caps a history that the
     /// environment leaves uncapped.
     fn history_size_limit(&self) -> Option<usize> {
-        let from_env = Self::env_usize(self.env_str("HISTSIZE"));
-        match (from_env, self.readline_options.history_size) {
-            (Some(env), Some(readline)) => Some(env.min(readline)),
-            (Some(env), None) => Some(env),
-            (None, readline) => readline,
+        match self.env_history_limit("HISTSIZE") {
+            HistoryLimit::Limited(limit) => Some(
+                self.readline_options
+                    .history_size
+                    .map_or(limit, |readline| limit.min(readline)),
+            ),
+            HistoryLimit::Unlimited => self.readline_options.history_size,
+            HistoryLimit::Unset => self.readline_options.history_size,
         }
     }
 
     /// Returns the number of entries the history file may hold, or `None` for no limit.
     fn history_file_size_limit(&self) -> Option<usize> {
-        // Bash defaults HISTFILESIZE to HISTSIZE after startup. We do not invent a default
-        // HISTSIZE, but when the user set one, the file limit follows it unless
-        // HISTFILESIZE overrides.
-        Self::env_usize(self.env_str("HISTFILESIZE")).or_else(|| self.history_size_limit())
+        match self.env_history_limit("HISTFILESIZE") {
+            HistoryLimit::Limited(limit) => Some(limit),
+            HistoryLimit::Unlimited => None,
+            // Bash defaults HISTFILESIZE to HISTSIZE after startup. Only an unset
+            // HISTFILESIZE gets this default; explicit empty, non-numeric, or negative values
+            // disable trimming.
+            HistoryLimit::Unset => self.history_size_limit(),
+        }
     }
 
-    /// Parses a size variable. As bash does here, an empty, negative, or otherwise invalid
-    /// value means "no limit"; zero is a real limit.
-    fn env_usize(value: Option<std::borrow::Cow<'_, str>>) -> Option<usize> {
-        value?.trim().parse().ok()
+    /// Parses a history size variable, preserving the difference between unset, explicitly
+    /// unlimited, and a numeric limit.
+    fn env_history_limit(&self, name: &str) -> HistoryLimit {
+        let Some(value) = self.env_str(name) else {
+            return HistoryLimit::Unset;
+        };
+        match value.trim().parse::<i64>() {
+            Ok(value) if value >= 0 => {
+                usize::try_from(value).map_or(HistoryLimit::Unlimited, HistoryLimit::Limited)
+            }
+            _ => HistoryLimit::Unlimited,
+        }
     }
 
     /// Returns whether `HISTIGNORE` says to leave `command` out. Patterns are shell globs, and
@@ -983,6 +1001,27 @@ mod tests {
         let contents = std::fs::read_to_string(&path)?;
         assert!(contents.contains("first-locked"), "{contents:?}");
         assert!(contents.contains("second-locked"), "{contents:?}");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn startup_trim_failure_keeps_loaded_history() -> Result<(), error::Error> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("history");
+        std::fs::write(&path, ": one\n: two\n")?;
+        std::fs::create_dir_all(crate::history_file::lock_path(&path))?;
+
+        let mut shell = crate::Shell::builder().build().await?;
+        shell.set_env_global(
+            "HISTFILE",
+            ShellVariable::new(path.to_string_lossy().to_string()),
+        )?;
+        shell.set_env_global("HISTSIZE", ShellVariable::new("1"))?;
+        shell.set_env_global("HISTFILESIZE", ShellVariable::new("0"))?;
+
+        let history = shell.load_history()?.expect("loaded history");
+        assert_eq!(history.iter().count(), 1);
+        assert_eq!(std::fs::read_to_string(&path)?, ": one\n: two\n");
         Ok(())
     }
 

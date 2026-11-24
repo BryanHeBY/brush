@@ -88,12 +88,14 @@ Command history settings.
 | `write-mode`          | string  | `"portable"` | `"portable"` locks and atomically replaces; `"bash"` uses unlocked in-place writes |
 
 By default, an interactive shell appends the commands it recorded when the session ends
-normally, as bash does. If the terminal is closed, brush saves the history before exiting;
-commands still running at that moment may not have been appended yet.
+normally. This is a Brush choice: Bash defaults to overwriting the file unless `histappend`
+is enabled. If the terminal is closed, brush saves the history before exiting; commands still
+running at that moment may not have been appended yet.
 
 With `append-immediately = true`, brush appends the command right after it finishes instead
-of waiting for the session to end. This is the zsh `INC_APPEND_HISTORY` style: the file is a
-step behind only while a command is still running.
+of waiting for the session to end. zsh's `INC_APPEND_HISTORY` and `SHARE_HISTORY` write while
+the command is running; Brush's timing is closer to `INC_APPEND_HISTORY_TIME` and is
+intentionally kept.
 
 `write-mode` controls only file writes, not the history list's semantics:
 
@@ -104,6 +106,9 @@ step behind only while a command is still running.
   and an overwrite truncates it in place. This is the closest match to Bash's documented file
   behavior and accepts the same concurrent-write races. It also works when the history
   directory is not writable but the file itself is.
+
+Both modes create a new history file privately (0600 on Unix); the mode only changes locking
+and replacement, not the new file's permissions. Existing files keep their permissions.
 
 The lock is a Brush extension; Bash documents no cross-process history lock. Different `TMPDIR`
 values do not affect the lock because it lives next to the resolved history target.
@@ -118,10 +123,12 @@ The history file is `$HISTFILE`, which defaults to `~/.brush_history`. Setting `
 an empty string keeps history in memory but disables reading and writing the file.
 
 Brush appends to the file by default, so several sessions can share it. `shopt -u histappend`
-selects bash's overwrite-on-exit behavior instead. `HISTSIZE` caps the in-memory history and
-`HISTFILESIZE` caps the file; each is applied as it is set, and leaving either unset keeps that
-history unbounded. `HISTIGNORE` patterns (including `&` for the previous command) are not
-recorded, and `HISTCONTROL` still applies.
+selects Bash's overwrite-on-exit behavior instead. `HISTSIZE` caps the in-memory history and
+`HISTFILESIZE` caps the file. An empty, non-numeric, or negative value explicitly disables
+that limit. If `HISTFILESIZE` is unset it follows `HISTSIZE`; if both are unset Brush keeps
+history unbounded rather than inventing Bash's default 500. `HISTIGNORE` patterns (including
+`&` for the previous command) are not recorded in interactive shells, and `HISTCONTROL`
+still applies.
 
 ### `[experimental]` Section
 
