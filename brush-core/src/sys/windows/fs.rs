@@ -388,6 +388,127 @@ pub(crate) fn history_file_identity(file: &std::fs::File) -> std::io::Result<(u6
     ))
 }
 
+/// Creates an empty replacement with the right to apply the old history file's DACL.
+pub(crate) fn create_history_replacement(path: &Path) -> std::io::Result<std::fs::File> {
+    use std::os::windows::fs::OpenOptionsExt as _;
+    use windows_sys::Win32::Storage::FileSystem::{FILE_GENERIC_WRITE, WRITE_DAC};
+
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .access_mode(FILE_GENERIC_WRITE | WRITE_DAC)
+        .open(path)
+}
+
+/// A Windows-owned security descriptor and the DACL stored within it.
+struct HistoryDacl {
+    descriptor: windows_sys::Win32::Security::PSECURITY_DESCRIPTOR,
+    acl: *mut windows_sys::Win32::Security::ACL,
+}
+
+impl Drop for HistoryDacl {
+    fn drop(&mut self) {
+        // SAFETY: GetSecurityInfo allocated this security descriptor with LocalAlloc.
+        unsafe { windows_sys::Win32::Foundation::LocalFree(self.descriptor) };
+    }
+}
+
+impl HistoryDacl {
+    fn read(file: &std::fs::File) -> std::io::Result<Self> {
+        use std::{os::windows::io::AsRawHandle as _, ptr::null_mut};
+        use windows_sys::Win32::Security::{
+            Authorization::{GetSecurityInfo, SE_FILE_OBJECT},
+            DACL_SECURITY_INFORMATION,
+        };
+
+        let mut descriptor = null_mut();
+        let mut acl = null_mut();
+        // SAFETY: the handle is live; both outputs point to writable fields. On success the
+        // DACL is null or points into the returned descriptor, which this guard owns.
+        let status = unsafe {
+            GetSecurityInfo(
+                file.as_raw_handle(),
+                SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION,
+                null_mut(),
+                null_mut(),
+                &raw mut acl,
+                null_mut(),
+                &raw mut descriptor,
+            )
+        };
+        if status == 0 {
+            Ok(Self { descriptor, acl })
+        } else {
+            Err(std::io::Error::from_raw_os_error(status.cast_signed()))
+        }
+    }
+
+    fn is_protected(&self) -> std::io::Result<bool> {
+        use windows_sys::Win32::Security::{GetSecurityDescriptorControl, SE_DACL_PROTECTED};
+
+        let mut control = 0;
+        let mut revision = 0;
+        // SAFETY: the guard owns a valid descriptor, and both output pointers are writable.
+        let result = unsafe {
+            GetSecurityDescriptorControl(self.descriptor, &raw mut control, &raw mut revision)
+        };
+        if result == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(control & SE_DACL_PROTECTED != 0)
+    }
+
+    fn apply(&self, file: &std::fs::File, protected: bool) -> std::io::Result<()> {
+        use std::{
+            os::windows::io::AsRawHandle as _,
+            ptr::{null, null_mut},
+        };
+        use windows_sys::Win32::Security::{
+            Authorization::{SE_FILE_OBJECT, SetSecurityInfo},
+            DACL_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION,
+            UNPROTECTED_DACL_SECURITY_INFORMATION,
+        };
+
+        let inheritance = if protected {
+            PROTECTED_DACL_SECURITY_INFORMATION
+        } else {
+            UNPROTECTED_DACL_SECURITY_INFORMATION
+        };
+        // SAFETY: both the file handle and the descriptor backing the ACL remain live.
+        // A null ACL is intentional only when the source file itself has a null DACL.
+        let status = unsafe {
+            SetSecurityInfo(
+                file.as_raw_handle(),
+                SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION | inheritance,
+                null_mut(),
+                null_mut(),
+                self.acl,
+                null(),
+            )
+        };
+        if status == 0 {
+            Ok(())
+        } else {
+            Err(std::io::Error::from_raw_os_error(status.cast_signed()))
+        }
+    }
+}
+
+/// Applies the target's DACL to the still-empty replacement. Fail before writing any history
+/// bytes if the target has an ACL that cannot be read or preserved.
+pub(crate) fn copy_history_dacl(replacement: &std::fs::File, target: &Path) -> std::io::Result<()> {
+    use std::os::windows::fs::OpenOptionsExt as _;
+    use windows_sys::Win32::Storage::FileSystem::READ_CONTROL;
+
+    let source = std::fs::OpenOptions::new()
+        .access_mode(READ_CONTROL)
+        .open(target)?;
+    let dacl = HistoryDacl::read(&source)?;
+    dacl.apply(replacement, dacl.is_protected()?)
+}
+
 /// Renames `temp` over `target`, replacing an existing file.
 pub fn replace_file(temp: &std::path::Path, target: &std::path::Path) -> std::io::Result<()> {
     use std::os::windows::ffi::OsStrExt as _;
@@ -434,6 +555,39 @@ pub const fn set_file_group(_file: &std::fs::File, _gid: u32) -> std::io::Result
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn atomic_history_replacement_preserves_protected_dacl() -> anyhow::Result<()> {
+        use std::os::windows::fs::OpenOptionsExt as _;
+        use windows_sys::Win32::Storage::FileSystem::{READ_CONTROL, WRITE_DAC};
+
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("history");
+        std::fs::write(&path, b"old\n")?;
+        let file = std::fs::OpenOptions::new()
+            .access_mode(READ_CONTROL | WRITE_DAC)
+            .open(&path)?;
+        let original = HistoryDacl::read(&file)?;
+        original.apply(&file, true)?;
+        anyhow::ensure!(
+            HistoryDacl::read(&file)?.is_protected()?,
+            "fixture DACL is not protected"
+        );
+        drop(file);
+
+        crate::history_file::atomic_write(&path, b"new\n")?;
+
+        let file = std::fs::File::open(&path)?;
+        anyhow::ensure!(
+            HistoryDacl::read(&file)?.is_protected()?,
+            "replacement lost DACL protection"
+        );
+        anyhow::ensure!(
+            std::fs::read(&path)? == b"new\n",
+            "replacement lost history"
+        );
+        Ok(())
+    }
 
     #[test]
     fn path_separator_helpers_both_slashes() {

@@ -297,7 +297,11 @@ pub(crate) fn atomic_write(path: &Path, contents: &[u8]) -> Result<(), error::Er
         Ok(metadata) if metadata.file_type().is_symlink() => std::fs::canonicalize(path)?,
         _ => path.to_path_buf(),
     };
-    let target_metadata = std::fs::metadata(&target).ok();
+    let target_metadata = match std::fs::metadata(&target) {
+        Ok(metadata) => Some(metadata),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error.into()),
+    };
     let permissions = target_metadata.as_ref().map(std::fs::Metadata::permissions);
     #[cfg(unix)]
     let group = target_metadata
@@ -314,7 +318,11 @@ pub(crate) fn atomic_write(path: &Path, contents: &[u8]) -> Result<(), error::Er
         temp_name.push(file_name);
         temp_name.push(format!(".tmp.{}.{attempt}", std::process::id()));
         let candidate = target.with_file_name(temp_name);
-        match crate::sys::fs::create_new_private_file(&candidate) {
+        #[cfg(windows)]
+        let replacement = crate::sys::fs::create_history_replacement(&candidate);
+        #[cfg(not(windows))]
+        let replacement = crate::sys::fs::create_new_private_file(&candidate);
+        match replacement {
             Ok(file) => {
                 created = Some((file, candidate));
                 break;
@@ -332,6 +340,10 @@ pub(crate) fn atomic_write(path: &Path, contents: &[u8]) -> Result<(), error::Er
     };
 
     let result = (|| -> Result<(), error::Error> {
+        #[cfg(windows)]
+        if target_metadata.is_some() {
+            crate::sys::fs::copy_history_dacl(&file, &target)?;
+        }
         file.write_all(contents)?;
         if let Some(permissions) = permissions {
             std::fs::set_permissions(&temp_path, permissions)?;

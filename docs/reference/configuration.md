@@ -101,14 +101,16 @@ intentionally kept.
 
 - `"portable"` (default) serializes writers with a sidecar lock next to the history file and
   rewrites through a private temporary file plus an atomic rename. It preserves the target's
-  permissions, symlink target, and group on Unix. The directory must be writable.
+  permission bits and group on Unix, the discretionary ACL and its inheritance protection on
+  Windows, and follows an existing history symlink. The directory must be writable.
 - `"bash"` writes in place without a lock or temporary copy: append opens the file for append,
   and an overwrite truncates it in place. This is the closest match to Bash's documented file
   behavior and accepts the same concurrent-write races. It also works when the history
   directory is not writable but the file itself is.
 
-Both modes create a new history file privately (0600 on Unix); the mode only changes locking
-and replacement, not the new file's permissions. Existing files keep their permissions.
+Both modes create a new history file with mode 0600 on Unix; on Windows a new file inherits
+the containing directory's access rules. Both write modes keep an existing file's access rules
+as described above.
 
 The lock is a Brush extension; Bash documents no cross-process history lock. Different `TMPDIR`
 values do not affect the lock because it lives next to the resolved history target.
