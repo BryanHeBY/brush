@@ -283,6 +283,7 @@ impl<SE: extensions::ShellExtensions> Default for Shell<SE> {
             key_bindings: None,
             history: None,
             history_file_state: crate::history_file::State::default(),
+            history_write_mode: crate::history::HistoryWriteMode::Portable,
         }
     }
 }

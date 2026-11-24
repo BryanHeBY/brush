@@ -85,6 +85,7 @@ Command history settings.
 |-----------------------|---------|---------|----------------------------------------------------------|
 | `append-immediately`  | boolean | `false` | Append each command to the history file as it finishes   |
 | `share`               | boolean | `false` | Import other sessions' new entries and append this session's |
+| `write-mode`          | string  | `"portable"` | `"portable"` locks and atomically replaces; `"bash"` uses unlocked in-place writes |
 
 By default, an interactive shell appends the commands it recorded when the session ends
 normally, as bash does. If the terminal is closed, brush saves the history before exiting;
@@ -93,6 +94,19 @@ commands still running at that moment may not have been appended yet.
 With `append-immediately = true`, brush appends the command right after it finishes instead
 of waiting for the session to end. This is the zsh `INC_APPEND_HISTORY` style: the file is a
 step behind only while a command is still running.
+
+`write-mode` controls only file writes, not the history list's semantics:
+
+- `"portable"` (default) serializes writers with a sidecar lock next to the history file and
+  rewrites through a private temporary file plus an atomic rename. It preserves the target's
+  permissions, symlink target, and group on Unix. The directory must be writable.
+- `"bash"` writes in place without a lock or temporary copy: append opens the file for append,
+  and an overwrite truncates it in place. This is the closest match to Bash's documented file
+  behavior and accepts the same concurrent-write races. It also works when the history
+  directory is not writable but the file itself is.
+
+The lock is a Brush extension; Bash documents no cross-process history lock. Different `TMPDIR`
+values do not affect the lock because it lives next to the resolved history target.
 
 `share = true` is the zsh `SHARE_HISTORY` style: before each prompt brush imports entries
 other sessions appended to the file, and after each command it appends this session's new

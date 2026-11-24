@@ -360,6 +360,24 @@ pub(crate) const fn resolve_executable_path(path: PathBuf, _working_dir: &Path) 
     path
 }
 
+/// Renames `temp` over `target`, replacing an existing file.
+pub fn replace_file(temp: &std::path::Path, target: &std::path::Path) -> std::io::Result<()> {
+    std::fs::rename(temp, target)
+}
+
+/// Preserves a file's group across an atomic replacement.
+pub fn set_file_group(file: &std::fs::File, gid: u32) -> std::io::Result<()> {
+    use std::os::unix::io::AsRawFd as _;
+
+    // SAFETY: the descriptor is valid for the lifetime of `file`; uid -1 leaves ownership alone.
+    let result = unsafe { libc::fchown(file.as_raw_fd(), !0, gid) };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -8,11 +8,21 @@ use std::{
 
 use crate::{
     error,
-    history_file::{atomic_write, lock_history_file, trim_history_entries},
+    history_file::{atomic_write, lock_history_file, open_append_file, trim_history_entries},
 };
 
 /// Represents a unique identifier for a history item.
 type ItemId = i64;
+
+/// How history file writes handle concurrency and replacement.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum HistoryWriteMode {
+    /// Lock writers and replace the file atomically, preserving permissions and symlinks.
+    #[default]
+    Portable,
+    /// Behave like Bash's file writes: no lock, no temporary copy, truncate in place.
+    Bash,
+}
 
 /// Interface for querying and manipulating the shell's recorded history of commands.
 // TODO(history): support maximum item count
@@ -34,6 +44,9 @@ pub struct History {
     /// IDs whose append failed and must survive HISTSIZE until they can be retried.
     #[cfg_attr(feature = "serde", serde(skip))]
     retry: BTreeSet<ItemId>,
+    /// File write policy; not serialized because it is session configuration.
+    #[cfg_attr(feature = "serde", serde(skip))]
+    write_mode: HistoryWriteMode,
 }
 
 impl History {
@@ -318,6 +331,16 @@ impl History {
         self.base
     }
 
+    /// Returns the file write policy.
+    pub const fn write_mode(&self) -> HistoryWriteMode {
+        self.write_mode
+    }
+
+    /// Sets the file write policy.
+    pub const fn set_write_mode(&mut self, mode: HistoryWriteMode) {
+        self.write_mode = mode;
+    }
+
     /// Returns the first dirty index, repairing it if an older serialized state omitted it.
     fn ensure_dirty_index(&mut self) -> Option<usize> {
         if self.first_dirty.is_none() {
@@ -336,10 +359,10 @@ impl History {
         let Some(start) = self.ensure_dirty_index() else {
             return Ok(());
         };
-        let mut file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(history_file_path.as_ref())?;
+        let mut file = open_append_file(
+            history_file_path.as_ref(),
+            self.write_mode == HistoryWriteMode::Portable,
+        )?;
         let mut written = Vec::new();
         for (index, item) in self.items.iter().enumerate().skip(start) {
             if !item.dirty {
@@ -377,19 +400,29 @@ impl History {
         unsaved_items_only: bool,
         write_timestamps: bool,
     ) -> Result<(), error::Error> {
-        let _lock = lock_history_file(history_file_path.as_ref())?;
+        let _lock = (self.write_mode == HistoryWriteMode::Portable)
+            .then(|| lock_history_file(history_file_path.as_ref()))
+            .transpose()?;
 
-        // Open the file
-        let mut file_options = std::fs::File::options();
-
-        if append {
-            file_options.append(true);
+        // Open the file. Portable mode creates new files privately; Bash mode honors umask.
+        let file = if append {
+            open_append_file(
+                history_file_path.as_ref(),
+                self.write_mode == HistoryWriteMode::Portable,
+            )?
         } else {
-            file_options.write(true).truncate(true);
-        }
-
-        let mut file =
-            std::io::BufWriter::new(file_options.create(true).open(history_file_path.as_ref())?);
+            let mut options = std::fs::OpenOptions::new();
+            options.write(true).truncate(true);
+            if self.write_mode == HistoryWriteMode::Portable {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::OpenOptionsExt as _;
+                    options.mode(0o600);
+                }
+            }
+            options.create(true).open(history_file_path.as_ref())?
+        };
+        let mut file = std::io::BufWriter::new(file);
 
         let first_dirty = unsaved_items_only
             .then(|| self.ensure_dirty_index())
@@ -454,6 +487,18 @@ impl History {
         use std::fmt::Write as _;
 
         let path = history_file_path.as_ref();
+        if self.items.is_empty() && !path.exists() {
+            return Ok(());
+        }
+        if self.write_mode == HistoryWriteMode::Bash {
+            return self.save_with_limit_in_place(
+                path,
+                append,
+                unsaved_items_only,
+                write_timestamps,
+                max_items,
+            );
+        }
         let _lock = lock_history_file(path)?;
 
         let first_dirty = unsaved_items_only
@@ -516,6 +561,83 @@ impl History {
         Ok(())
     }
 
+    /// Bash-style save: append or truncate the target in place, without locking or a copy.
+    fn save_with_limit_in_place(
+        &mut self,
+        path: &Path,
+        append: bool,
+        unsaved_items_only: bool,
+        write_timestamps: bool,
+        max_items: Option<usize>,
+    ) -> Result<(), error::Error> {
+        use std::fmt::Write as _;
+
+        if self.items.is_empty() && !path.exists() {
+            return Ok(());
+        }
+        let first_dirty = unsaved_items_only
+            .then(|| self.ensure_dirty_index())
+            .flatten();
+        if append && unsaved_items_only && first_dirty.is_none() && max_items.is_none() {
+            return Ok(());
+        }
+        if append && unsaved_items_only && max_items.is_none() {
+            self.append_unsaved(path, write_timestamps)?;
+            return Ok(());
+        }
+
+        let existing = if append {
+            match std::fs::read_to_string(path) {
+                Ok(existing) => existing,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+                Err(error) => return Err(error.into()),
+            }
+        } else {
+            String::new()
+        };
+        let start = if unsaved_items_only {
+            first_dirty.unwrap_or(0)
+        } else {
+            0
+        };
+        let mut content = existing;
+        let mut written = Vec::new();
+        for (index, item) in self.items.iter().enumerate().skip(start) {
+            if unsaved_items_only && !item.dirty {
+                continue;
+            }
+            if write_timestamps && let Some(timestamp) = item.timestamp {
+                writeln!(content, "#{}", timestamp.as_unix_seconds())?;
+            }
+            writeln!(content, "{}", item.command_line)?;
+            if unsaved_items_only {
+                written.push(index);
+            }
+        }
+        if let Some(max_items) = max_items {
+            content = trim_history_entries(&content, max_items);
+        }
+
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .open(path)?;
+        file.write_all(content.as_bytes())?;
+        file.flush()?;
+
+        for index in written {
+            if let Some(item) = self.items.get_mut(index) {
+                item.dirty = false;
+            }
+        }
+        if unsaved_items_only {
+            self.first_dirty = None;
+        }
+        self.retry.clear();
+        Ok(())
+    }
+
     /// Trims the backing file to its last `max_items` lines.
     ///
     /// `HISTFILESIZE` counts entries, but a history file can also contain timestamp lines; a
@@ -527,7 +649,9 @@ impl History {
         max_items: usize,
     ) -> Result<(), error::Error> {
         let path = history_file_path.as_ref();
-        let _lock = lock_history_file(path)?;
+        let _lock = (self.write_mode == HistoryWriteMode::Portable)
+            .then(|| lock_history_file(path))
+            .transpose()?;
         let Ok(contents) = std::fs::read_to_string(path) else {
             return Ok(());
         };
@@ -996,7 +1120,7 @@ fn add_imported(
 #[allow(clippy::panic_in_result_fn, reason = "assertions in a fallible test")]
 mod tests {
     use super::*;
-    use crate::history_file::lock_path as history_lock_path;
+    use crate::history_file::{lock_path, lock_path as history_lock_path};
 
     fn history(lines: &[&str]) -> Result<History, error::Error> {
         let mut history = History::default();
@@ -1287,6 +1411,56 @@ mod tests {
         std::fs::write(&target, "")?;
         symlink(&target, &link)?;
         assert_eq!(history_lock_path(&target), history_lock_path(&link));
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn portable_history_and_lock_are_private() -> Result<(), error::Error> {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("history");
+        let mut history = History::default();
+        history.add(Item::new("private-entry"))?;
+        history.save_with_limit(&path, true, true, false, None)?;
+
+        assert_eq!(
+            std::fs::metadata(&path)?.permissions().mode() & 0o777,
+            0o600
+        );
+        assert_eq!(
+            std::fs::metadata(lock_path(&path))?.permissions().mode() & 0o777,
+            0o600
+        );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_modes_choose_between_in_place_and_atomic() -> Result<(), error::Error> {
+        use std::os::unix::fs::MetadataExt as _;
+
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("history");
+        std::fs::write(&path, "old\n")?;
+        let inode = std::fs::metadata(&path)?.ino();
+
+        let mut history = History::default();
+        history.set_write_mode(HistoryWriteMode::Bash);
+        history.add(Item::new("bash-entry"))?;
+        history.save_with_limit(&path, false, false, false, None)?;
+        assert_eq!(std::fs::metadata(&path)?.ino(), inode);
+        assert!(!lock_path(&path).exists());
+
+        std::fs::write(&path, "old\n")?;
+        let inode = std::fs::metadata(&path)?.ino();
+        let mut history = History::default();
+        history.set_write_mode(HistoryWriteMode::Portable);
+        history.add(Item::new("portable-entry"))?;
+        history.save_with_limit(&path, false, false, false, None)?;
+        assert_ne!(std::fs::metadata(&path)?.ino(), inode);
+        assert!(lock_path(&path).exists());
         Ok(())
     }
 

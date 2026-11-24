@@ -42,6 +42,9 @@ pub struct UIOptions {
     /// Whether to share the history file with other sessions.
     #[builder(default)]
     pub history_share: bool,
+    /// How history file writes handle concurrency and replacement.
+    #[builder(default)]
+    pub history_write_mode: brush_core::history::HistoryWriteMode,
 }
 
 impl From<&UIOptions> for crate::InteractiveOptions {
@@ -51,6 +54,7 @@ impl From<&UIOptions> for crate::InteractiveOptions {
             zsh_style_hooks: options.zsh_style_hooks,
             history_append_immediately: options.history_append_immediately,
             history_share: options.history_share,
+            history_write_mode: options.history_write_mode,
         }
     }
 }

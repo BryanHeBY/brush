@@ -905,6 +905,35 @@ cases:
       : zero-marker
       history
 
+  - name: "HISTIGNORE is ignored by a non-interactive history shell"
+    args: ["-o", "history"]
+    env:
+      HISTFILE: "history-file.txt"
+      HISTIGNORE: "*foo\\:bar*"
+    stdin: |
+      : foo:bar
+      echo kept
+      history
+      unset HISTFILE
+
+  - name: "startup truncates the history file to HISTSIZE when HISTFILESIZE is unset"
+    args: ["-i"]
+    ignore_stderr: true # Ignore job control warnings from interactive shell without a tty
+    env:
+      HISTFILE: "history-file.txt"
+      HISTSIZE: "2"
+    test_files:
+      - path: "history-file.txt"
+        contents: |
+          : old1
+          : old2
+          : old3
+          : old4
+          : old5
+    stdin: |
+      : new
+      unset HISTFILE
+
   - name: "History expansion"
     known_failure: true # brush doesn't implement history expansion
     ignore_stderr: true # Ignore job control warnings from interactive shell without a tty

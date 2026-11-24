@@ -42,6 +42,8 @@ pub struct InteractiveOptions {
     /// Whether to import new history file entries and append this session's commands as they
     /// finish.
     pub history_share: bool,
+    /// How history file writes handle concurrency and replacement.
+    pub history_write_mode: brush_core::history::HistoryWriteMode,
 }
 
 /// Reads `PROMPT_COMMAND` as bash does: a string is a single command, an indexed array is one
@@ -86,6 +88,10 @@ impl<'a, IB: InputBackend, SE: brush_core::ShellExtensions> InteractiveShell<'a,
         options: &InteractiveOptions,
     ) -> Result<Self, ShellError> {
         let stdin_is_terminal = std::io::stdin().is_terminal();
+
+        if let Ok(mut shell) = shell.try_lock() {
+            shell.set_history_write_mode(options.history_write_mode);
+        }
 
         // Acquire terminal control if stdin is a terminal.
         let terminal_control = if stdin_is_terminal {

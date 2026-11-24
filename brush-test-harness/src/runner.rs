@@ -678,8 +678,8 @@ fn collect_temp_dir_files(
             continue;
         }
 
-        // Skip coverage profile data
-        if filename.ends_with(".profraw") {
+        // Skip coverage profile data and Brush's private history lock.
+        if filename.ends_with(".profraw") || filename.ends_with(".brush-lock") {
             continue;
         }
 

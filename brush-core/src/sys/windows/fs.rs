@@ -463,13 +463,77 @@ mod tests {
     }
 }
 
-/// An exclusive lock on a history file; this platform has no portable advisory lock, so it
-/// only keeps the descriptor open.
+/// An exclusive Windows lock on a history file.
 pub struct HistoryFileLock(std::fs::File);
 
-/// Takes an exclusive advisory lock on `file` if the platform supports one.
+impl Drop for HistoryFileLock {
+    fn drop(&mut self) {
+        use std::os::windows::io::AsRawHandle as _;
+
+        let mut overlapped = unsafe { std::mem::zeroed() };
+        // SAFETY: the file handle is valid for the lifetime of the guard, and the overlapped
+        // structure is initialized for an offset-0 whole-file unlock.
+        unsafe {
+            let _ = windows_sys::Win32::Storage::FileSystem::UnlockFileEx(
+                self.0.as_raw_handle() as windows_sys::Win32::Foundation::HANDLE,
+                0,
+                u32::MAX,
+                u32::MAX,
+                &mut overlapped,
+            );
+        }
+    }
+}
+
+/// Takes an exclusive Windows file lock, blocking until it is available.
 pub fn lock_history_file(file: std::fs::File) -> std::io::Result<HistoryFileLock> {
+    use std::os::windows::io::AsRawHandle as _;
+
+    let mut overlapped = unsafe { std::mem::zeroed() };
+    // SAFETY: the handle comes from an open file and the overlapped structure is initialized.
+    let result = unsafe {
+        windows_sys::Win32::Storage::FileSystem::LockFileEx(
+            file.as_raw_handle() as windows_sys::Win32::Foundation::HANDLE,
+            windows_sys::Win32::Storage::FileSystem::LOCKFILE_EXCLUSIVE_LOCK,
+            0,
+            u32::MAX,
+            u32::MAX,
+            &mut overlapped,
+        )
+    };
+    if result == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
     Ok(HistoryFileLock(file))
+}
+
+/// Renames `temp` over `target`, replacing an existing file.
+pub fn replace_file(temp: &std::path::Path, target: &std::path::Path) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt as _;
+
+    let temp: Vec<u16> = temp
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let target: Vec<u16> = target
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    // SAFETY: both paths are NUL-terminated UTF-16 buffers that live for the call.
+    let result = unsafe {
+        windows_sys::Win32::Storage::FileSystem::MoveFileExW(
+            temp.as_ptr(),
+            target.as_ptr(),
+            windows_sys::Win32::Storage::FileSystem::MOVEFILE_REPLACE_EXISTING
+                | windows_sys::Win32::Storage::FileSystem::MOVEFILE_WRITE_THROUGH,
+        )
+    };
+    if result == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
 }
 
 /// Creates a new file. The caller is responsible for restrictive permissions where the
@@ -479,4 +543,9 @@ pub fn create_new_private_file(path: &std::path::Path) -> std::io::Result<std::f
         .write(true)
         .create_new(true)
         .open(path)
+}
+
+/// Preserves a file's group across an atomic replacement where the platform has POSIX groups.
+pub fn set_file_group(_file: &std::fs::File, _gid: u32) -> std::io::Result<()> {
+    Ok(())
 }

@@ -201,7 +201,7 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
         options.read(true);
 
         let mut history_file =
-            self.open_file(&options, history_path, &self.default_exec_params())?;
+            self.open_file(&options, history_path.clone(), &self.default_exec_params())?;
 
         // Check on the file's size.
         if let openfiles::OpenFile::File(file) = &mut history_file {
@@ -225,6 +225,10 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
         if let Some(limit) = self.history_size_limit() {
             history.retain_last(limit);
         }
+        history.set_write_mode(self.history_write_mode);
+        if let Some(limit) = self.history_file_size_limit() {
+            history.truncate_file(&history_path, limit)?;
+        }
         Ok(Some(history))
     }
 
@@ -242,7 +246,10 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
 
     /// Returns the number of entries the history file may hold, or `None` for no limit.
     fn history_file_size_limit(&self) -> Option<usize> {
-        Self::env_usize(self.env_str("HISTFILESIZE"))
+        // Bash defaults HISTFILESIZE to HISTSIZE after startup. We do not invent a default
+        // HISTSIZE, but when the user set one, the file limit follows it unless
+        // HISTFILESIZE overrides.
+        Self::env_usize(self.env_str("HISTFILESIZE")).or_else(|| self.history_size_limit())
     }
 
     /// Parses a size variable. As bash does here, an empty, negative, or otherwise invalid
@@ -282,6 +289,23 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
         }
 
         Ok(false)
+    }
+
+    /// Returns the configured history file write policy.
+    pub const fn history_write_mode(&self) -> crate::history::HistoryWriteMode {
+        self.history_write_mode
+    }
+
+    /// Sets the history file write policy, including for an already-loaded history.
+    #[expect(
+        clippy::missing_const_for_fn,
+        reason = "updating the loaded history requires a mutable borrow, which is not const"
+    )]
+    pub fn set_history_write_mode(&mut self, mode: crate::history::HistoryWriteMode) {
+        self.history_write_mode = mode;
+        if let Some(history) = &mut self.history {
+            history.set_write_mode(mode);
+        }
     }
 
     /// Returns the path to the history file used by the shell, if one is set.
@@ -516,14 +540,18 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
         };
         let write_timestamps = self.env.is_set("HISTTIMEFORMAT");
 
-        let _lock = match lock_history_file(history_file_path.as_path()) {
-            Ok(lock) => lock,
-            Err(error) => {
-                if let Some(history) = &mut self.history {
-                    history.mark_dirty_retry();
+        let _lock = if self.history_write_mode == crate::history::HistoryWriteMode::Portable {
+            Some(match lock_history_file(history_file_path.as_path()) {
+                Ok(lock) => lock,
+                Err(error) => {
+                    if let Some(history) = &mut self.history {
+                        history.mark_dirty_retry();
+                    }
+                    return Err(error);
                 }
-                return Err(error);
-            }
+            })
+        } else {
+            None
         };
         let appended: Vec<_> = self
             .history
@@ -563,14 +591,18 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
         };
         let write_timestamps = self.env.is_set("HISTTIMEFORMAT");
 
-        let _lock = match lock_history_file(history_file_path.as_path()) {
-            Ok(lock) => lock,
-            Err(error) => {
-                if let Some(history) = &mut self.history {
-                    history.mark_dirty_retry();
+        let _lock = if self.history_write_mode == crate::history::HistoryWriteMode::Portable {
+            Some(match lock_history_file(history_file_path.as_path()) {
+                Ok(lock) => lock,
+                Err(error) => {
+                    if let Some(history) = &mut self.history {
+                        history.mark_dirty_retry();
+                    }
+                    return Err(error);
                 }
-                return Err(error);
-            }
+            })
+        } else {
+            None
         };
         let pending = self
             .history
@@ -668,7 +700,7 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
         };
         let command = command.as_ref();
 
-        if self.history_ignored(command)? {
+        if self.options.interactive && self.history_ignored(command)? {
             return Ok(());
         }
 

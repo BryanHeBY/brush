@@ -10,6 +10,7 @@ additive unless marked otherwise.
 - `history_suggestion_navigation` (default `false`)
 - `history_append_immediately` (default `false`)
 - `history_share` (default `false`)
+- `history_write_mode` (default `HistoryWriteMode::Portable`)
 
 The builder and `Default` implementations continue to work. Downstream code that initializes
 `UIOptions` with an **exhaustive struct literal** must add the new fields (or switch to a

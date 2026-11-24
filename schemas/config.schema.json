@@ -59,8 +59,34 @@
             "null"
           ],
           "default": null
+        },
+        "write-mode": {
+          "description": "How history file writes handle concurrency and replacement.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/HistoryWriteModeConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       }
+    },
+    "HistoryWriteModeConfig": {
+      "description": "History file write policy exposed in the configuration file.",
+      "oneOf": [
+        {
+          "description": "Lock writers and replace the history file atomically.",
+          "type": "string",
+          "const": "portable"
+        },
+        {
+          "description": "Use Bash-style unlocked, in-place history writes.",
+          "type": "string",
+          "const": "bash"
+        }
+      ]
     },
     "UiConfig": {
       "description": "User interface configuration options.\n\nBuilt from a configuration file or with [`Default`]. New settings are added as the shell\ngains them; use `..Default::default()` when constructing a value by hand so later fields\ndo not break the literal.",

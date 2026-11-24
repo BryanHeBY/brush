@@ -170,6 +170,10 @@ pub struct Shell<SE: extensions::ShellExtensions = extensions::DefaultShellExten
     /// File cursor and this session's immediate appends, for `history -n` and share mode.
     #[cfg_attr(feature = "serde", serde(skip))]
     history_file_state: crate::history_file::State,
+
+    /// File write policy for this shell.
+    #[cfg_attr(feature = "serde", serde(skip))]
+    history_write_mode: crate::history::HistoryWriteMode,
 }
 
 impl<SE: extensions::ShellExtensions> Clone for Shell<SE> {
@@ -216,6 +220,7 @@ impl<SE: extensions::ShellExtensions> Clone for Shell<SE> {
             key_bindings: self.key_bindings.clone(),
             history: self.history.clone(),
             history_file_state: self.history_file_state.clone(),
+            history_write_mode: self.history_write_mode,
             depth: self.depth + 1,
             command_number: self.command_number,
         }

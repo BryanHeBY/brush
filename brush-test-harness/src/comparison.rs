@@ -286,8 +286,8 @@ pub fn diff_dirs(
             let file_type = entry.file_type()?;
             let filename = entry.file_name().to_string_lossy().to_string();
 
-            // Ignore raw coverage profile data files.
-            if filename.ends_with(".profraw") {
+            // Ignore raw coverage profile data files and Brush's private history lock.
+            if filename.ends_with(".profraw") || filename.ends_with(".brush-lock") {
                 continue;
             }
 

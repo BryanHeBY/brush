@@ -50,6 +50,27 @@ pub struct UiConfig {
     pub history_suggestion_navigation: Option<bool>,
 }
 
+/// History file write policy exposed in the configuration file.
+#[derive(Debug, Default, Clone, Copy, serde::Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "kebab-case")]
+pub enum HistoryWriteModeConfig {
+    /// Lock writers and replace the history file atomically.
+    #[default]
+    Portable,
+    /// Use Bash-style unlocked, in-place history writes.
+    Bash,
+}
+
+impl From<HistoryWriteModeConfig> for brush_core::history::HistoryWriteMode {
+    fn from(value: HistoryWriteModeConfig) -> Self {
+        match value {
+            HistoryWriteModeConfig::Portable => Self::Portable,
+            HistoryWriteModeConfig::Bash => Self::Bash,
+        }
+    }
+}
+
 /// Command history configuration.
 #[derive(Debug, Default, Clone, serde::Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -63,6 +84,10 @@ pub struct HistoryConfig {
     /// commands as they finish.
     #[serde(rename = "share")]
     pub share: Option<bool>,
+
+    /// How history file writes handle concurrency and replacement.
+    #[serde(rename = "write-mode")]
+    pub write_mode: Option<HistoryWriteModeConfig>,
 }
 
 /// Experimental features configuration.
@@ -125,6 +150,7 @@ impl Config {
             )
             .history_append_immediately(self.history.append_immediately.unwrap_or_default())
             .history_share(self.history.share.unwrap_or_default())
+            .history_write_mode(self.history.write_mode.unwrap_or_default().into())
             .terminal_shell_integration(terminal_shell_integration)
             .zsh_style_hooks(zsh_style_hooks)
             .build()
@@ -371,6 +397,22 @@ mod tests {
         let config: Config = toml::from_str(toml).unwrap();
         assert_eq!(config.ui.syntax_highlighting, Some(true));
         assert_eq!(config.experimental.zsh_hooks, Some(false));
+    }
+
+    #[test]
+    fn history_write_mode_config_maps_to_ui_mode() {
+        let config: Config = toml::from_str("[history]\nwrite-mode = \"bash\"\n").unwrap();
+        let ui = config.to_ui_options(&CommandLineArgs::default_values());
+        assert_eq!(
+            ui.history_write_mode,
+            brush_core::history::HistoryWriteMode::Bash
+        );
+
+        let ui = Config::default().to_ui_options(&CommandLineArgs::default_values());
+        assert_eq!(
+            ui.history_write_mode,
+            brush_core::history::HistoryWriteMode::Portable
+        );
     }
 
     #[test]

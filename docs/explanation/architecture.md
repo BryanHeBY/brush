@@ -62,7 +62,9 @@ without its front end. Keep that in mind when deciding what to export.
 - History is split by responsibility: `History` owns entries, numbering, search, and the
   in-memory limit; the private `history_file` module owns the on-disk format (timestamps and
   complete-record boundaries), file identity, the incremental read cursor, locking, and atomic
-  writes; `Shell` interprets `HIST*` and `shopt` settings and coordinates the two.
+  writes; `Shell` interprets `HIST*` and `shopt` settings and coordinates the two. Portable
+  writes use a sidecar lock beside the resolved history target; the `bash` write mode bypasses
+  the lock and replaces files in place.
 - A shell keeps its builtins' registrations, by name, in a `builtins::Registry`
   (`Shell::builtins`, `Shell::builtins_mut`), which is the one way to look them up,
   register them, or enable and disable them. How it stores them is private, so

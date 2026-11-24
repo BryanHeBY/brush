@@ -159,21 +159,16 @@ pub(crate) fn trim_history_entries(contents: &str, max_items: usize) -> String {
 pub(crate) fn lock_history_file(
     path: &Path,
 ) -> Result<crate::sys::fs::HistoryFileLock, error::Error> {
-    let lock_path = lock_path(path);
-    let file = std::fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .write(true)
-        .open(lock_path)?;
+    let file = open_lock_file(&lock_path(path))?;
     Ok(crate::sys::fs::lock_history_file(file)?)
 }
 
-/// Returns the fixed lock file path for a history path. It is deliberately independent of
-/// `TMPDIR`, and symlinks are resolved so every spelling uses one lock.
+/// Returns the sidecar lock file path for a history path.
+///
+/// The lock lives next to the resolved history target, so every writer of the same file uses
+/// one lock regardless of `TMPDIR` or the spelling used to reach it.
 pub(crate) fn lock_path(path: &Path) -> PathBuf {
-    use std::hash::{Hash as _, Hasher as _};
-
-    let lock_identity = path.canonicalize().unwrap_or_else(|_| {
+    let target = path.canonicalize().unwrap_or_else(|_| {
         let absolute = if path.is_absolute() {
             path.to_path_buf()
         } else {
@@ -192,13 +187,45 @@ pub(crate) fn lock_path(path: &Path) -> PathBuf {
             });
         parent.join(file_name)
     });
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    lock_identity.hash(&mut hasher);
-    #[cfg(unix)]
-    let lock_directory = Path::new("/tmp");
-    #[cfg(not(unix))]
-    let lock_directory = std::env::temp_dir();
-    lock_directory.join(format!("brush-history-{:016x}.lock", hasher.finish()))
+    let Some(file_name) = target.file_name() else {
+        return target.with_extension("brush-lock");
+    };
+    let mut lock_name = std::ffi::OsString::from(".");
+    lock_name.push(file_name);
+    lock_name.push(".brush-lock");
+    target.with_file_name(lock_name)
+}
+
+/// Opens a history file for appending. Portable mode creates a new file privately (0600 on
+/// Unix); Bash mode uses the process umask.
+pub(crate) fn open_append_file(path: &Path, private: bool) -> Result<std::fs::File, error::Error> {
+    if !private {
+        return Ok(std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)?);
+    }
+    match crate::sys::fs::create_new_private_file(path) {
+        Ok(file) => Ok(file),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            Ok(std::fs::OpenOptions::new().append(true).open(path)?)
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
+/// Opens or creates the sidecar lock file.
+pub(crate) fn open_lock_file(path: &Path) -> Result<std::fs::File, error::Error> {
+    match crate::sys::fs::create_new_private_file(path) {
+        Ok(file) => Ok(file),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            Ok(std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(path)?)
+        }
+        Err(error) => Err(error.into()),
+    }
 }
 
 /// Writes `contents` to an exclusively-created temporary file next to `target`, then renames
@@ -208,9 +235,12 @@ pub(crate) fn atomic_write(path: &Path, contents: &[u8]) -> Result<(), error::Er
         Ok(metadata) if metadata.file_type().is_symlink() => std::fs::canonicalize(path)?,
         _ => path.to_path_buf(),
     };
-    let permissions = std::fs::metadata(&target)
-        .ok()
-        .map(|metadata| metadata.permissions());
+    let target_metadata = std::fs::metadata(&target).ok();
+    let permissions = target_metadata.as_ref().map(std::fs::Metadata::permissions);
+    #[cfg(unix)]
+    let group = target_metadata
+        .as_ref()
+        .map(std::os::unix::fs::MetadataExt::gid);
 
     let file_name = target.file_name().ok_or_else(|| {
         std::io::Error::new(std::io::ErrorKind::InvalidInput, "invalid history file")
@@ -244,9 +274,13 @@ pub(crate) fn atomic_write(path: &Path, contents: &[u8]) -> Result<(), error::Er
         if let Some(permissions) = permissions {
             std::fs::set_permissions(&temp_path, permissions)?;
         }
+        #[cfg(unix)]
+        if let Some(group) = group {
+            crate::sys::fs::set_file_group(&file, group)?;
+        }
         file.sync_all()?;
         drop(file);
-        std::fs::rename(&temp_path, &target)?;
+        crate::sys::fs::replace_file(&temp_path, &target)?;
         Ok(())
     })();
     if result.is_err() {

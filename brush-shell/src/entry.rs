@@ -383,6 +383,12 @@ async fn run_in_shell(
     let read_commands_from_stdin = args.will_read_commands_from_stdin();
     let interactive_options: brush_interactive::InteractiveOptions = ui_options.into();
 
+    // Apply the history write policy before config files load history.
+    shell_ref
+        .lock()
+        .await
+        .set_history_write_mode(interactive_options.history_write_mode);
+
     // Before config files run, so they (and what they source) observe it -- and only for a
     // shell that goes on to read commands interactively below, since only such a shell
     // dispatches hooks.

@@ -162,3 +162,13 @@ pub fn create_new_private_file(path: &std::path::Path) -> std::io::Result<std::f
         .create_new(true)
         .open(path)
 }
+
+/// Renames `temp` over `target`, replacing an existing file.
+pub fn replace_file(temp: &std::path::Path, target: &std::path::Path) -> std::io::Result<()> {
+    std::fs::rename(temp, target)
+}
+
+/// Preserves a file's group across an atomic replacement where the platform has POSIX groups.
+pub fn set_file_group(_file: &std::fs::File, _gid: u32) -> std::io::Result<()> {
+    Ok(())
+}
