@@ -84,6 +84,20 @@ impl KeyReader {
                 return Ok(Some(key));
             }
 
+            if terminal.can_poll_for_input() {
+                loop {
+                    if crate::hangup::requested() {
+                        return Ok(None);
+                    }
+                    match terminal.wait_for_input(Duration::from_millis(100)) {
+                        Ok(true) => break,
+                        Ok(false) => {}
+                        Err(err) if err.kind() == std::io::ErrorKind::Unsupported => break,
+                        Err(err) => return Err(err),
+                    }
+                }
+            }
+
             let mut bytes = [0; 256];
             let count = loop {
                 match terminal.read(&mut bytes) {

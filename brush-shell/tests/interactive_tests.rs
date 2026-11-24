@@ -606,7 +606,7 @@ fn read_history_file(home: &std::path::Path) -> String {
 /// disappear with it, whether the default (reedline) backend or the minimal one is reading.
 #[test]
 fn history_survives_hangup() -> anyhow::Result<()> {
-    for backend in [None, Some("minimal")] {
+    for backend in [None, Some("minimal"), Some("basic")] {
         let home = tempfile::tempdir()?;
         let mut session = start_history_session(backend, None, home.path())?;
         session.expect_prompt()?;

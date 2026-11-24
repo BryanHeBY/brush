@@ -37,6 +37,13 @@ pub trait Terminal: Send {
         std::io::stdin().read(buf)
     }
 
+    /// Whether [`Self::wait_for_input`] can be used to poll without blocking. The VT
+    /// backend uses this to notice a hangup while waiting for a key; synthetic terminals
+    /// used in tests keep their blocking `read` behavior.
+    fn can_poll_for_input(&self) -> bool {
+        false
+    }
+
     /// Waits up to `timeout` for the terminal to send more; returns whether it did.
     /// This tells a key that sends several bytes, which may arrive separately, from
     /// keys pressed one after another. By default, it doesn't wait, and reports that
@@ -112,6 +119,10 @@ pub struct StdTerminal {
 }
 
 impl Terminal for StdTerminal {
+    fn can_poll_for_input(&self) -> bool {
+        true
+    }
+
     fn enable_raw_mode(&mut self) -> std::io::Result<()> {
         // Only a Unix terminal can be set to send keys as bytes, unechoed: the
         // Windows console sends them only in a mode brush doesn't set, and WASI
