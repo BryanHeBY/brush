@@ -126,7 +126,7 @@ fn unicode_history_search_recalls_on_character_boundary() -> anyhow::Result<()> 
 fn greek_final_sigma_history_search() -> anyhow::Result<()> {
     let temp = tempfile::tempdir()?;
     let history = temp.path().join("history");
-    std::fs::write(&history, ": ΟΣ\n")?;
+    std::fs::write(&history, ": ΟΣΧ_MARKER\n")?;
     let inputrc = temp.path().join("inputrc");
     std::fs::write(
         &inputrc,
@@ -140,12 +140,12 @@ fn greek_final_sigma_history_search() -> anyhow::Result<()> {
     })?;
     expect_next_prompt(&mut session, 0)?;
 
-    session.send(": ος")?;
+    session.send(": οσ")?;
     session.send("\x14")?;
     session.send("\x05")?;
     session
-        .expect(": ΟΣ")
-        .context("Greek final sigma did not match case-insensitively")?;
+        .expect(": ΟΣΧ_MARKER")
+        .context("Greek prefix did not match case-insensitively")?;
     session.send("\r")?;
     expect_next_prompt(&mut session, 0)?;
 

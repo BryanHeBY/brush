@@ -282,16 +282,21 @@ fn matched_prefix_len(candidate: &str, prefix: &str, ignore_case: bool) -> Optio
     if lowercase_prefix.is_empty() {
         return Some(0);
     }
-    // Use the same whole-string lowercasing as the candidate filter. `char::to_lowercase`
-    // alone is not equivalent: Greek final sigma depends on its position in the word.
+    // Match against the whole candidate's lowercasing, as the candidate filter does. Greek
+    // final sigma depends on the character that follows the prefix, so lowercasing only the
+    // prefix would disagree with the filter. Once the whole string matches, map the query's
+    // lowercase length back to the nearest original character boundary.
+    let lowercase_candidate = candidate.to_lowercase();
+    if !lowercase_candidate.starts_with(&lowercase_prefix) {
+        return None;
+    }
     for (index, character) in candidate.char_indices() {
         let boundary = index + character.len_utf8();
         let Some(prefix_text) = candidate.get(..boundary) else {
             continue;
         };
-        let lowercase = prefix_text.to_lowercase();
-        if lowercase.len() >= lowercase_prefix.len() {
-            return lowercase.starts_with(&lowercase_prefix).then_some(boundary);
+        if prefix_text.to_lowercase().len() >= lowercase_prefix.len() {
+            return Some(boundary);
         }
     }
     None
@@ -976,6 +981,7 @@ mod tests {
         assert_eq!(matched_prefix_len(": k界", ": K", true), Some(3));
         assert_eq!(matched_prefix_len("İ", "i", true), Some(2));
         assert_eq!(matched_prefix_len(": ΟΣ", ": ος", true), Some(6));
+        assert_eq!(matched_prefix_len(": ΟΣΧ_MARKER", ": οσ", true), Some(6));
         assert_eq!(matched_prefix_len("界", "k", true), None);
         assert_eq!(matched_prefix_len("abc", "", true), Some(0));
     }

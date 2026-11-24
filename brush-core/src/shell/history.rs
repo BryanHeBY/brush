@@ -14,7 +14,7 @@ use crate::{error, history::HistoryControl, openfiles, patterns};
 /// written. Elsewhere, a line that ends a simple command is followed by `"; "`, a line ending
 /// at a keyword or a continuation by a space, and a backslash-newline is removed. Leading
 /// whitespace on the next line is kept.
-fn join_multiline_command(command: &str) -> String {
+fn join_multiline_command(command: &str, parser_options: &brush_parser::ParserOptions) -> String {
     if command.contains("<<") && !command.contains("<<<") {
         // Bash keeps a trailing newline as part of a here-document history entry.
         return format!("{command}\n");
@@ -28,35 +28,10 @@ fn join_multiline_command(command: &str) -> String {
 
     for (index, line) in command.lines().enumerate() {
         if index > 0 && !continued {
-            let previous = joined.trim_end();
-            let last_word = previous.split_whitespace().last().unwrap_or_default();
-            let keyword = matches!(
-                last_word,
-                "do" | "then"
-                    | "else"
-                    | "elif"
-                    | "if"
-                    | "while"
-                    | "until"
-                    | "for"
-                    | "case"
-                    | "in"
-                    | "{"
-                    | "("
-                    | "!"
-                    | "|"
-                    | "||"
-                    | "&&"
-                    | "&"
-                    | ";"
-            );
-
-            let trailing_operator = line_ends_with_operator(previous);
-            if keyword || trailing_operator {
-                joined.push(' ');
-            } else {
-                joined.push_str("; ");
-            }
+            let Some(separator) = history_line_separator(&joined, line, parser_options) else {
+                return command.to_owned();
+            };
+            joined.push_str(separator);
         }
 
         if let Some(without_backslash) = line.strip_suffix('\\') {
@@ -71,44 +46,45 @@ fn join_multiline_command(command: &str) -> String {
     joined
 }
 
-/// Returns true if the line's last significant, unquoted, unescaped character is a shell
-/// operator that continues the command across a newline.
-fn line_ends_with_operator(line: &str) -> bool {
-    let mut quote = None;
-    let mut escaped = false;
-    let mut last_is_operator = false;
+/// Chooses the separator for a newline in a multi-line command, using the parser to decide
+/// whether the accumulated text is already a complete program.
+///
+/// A complete program gets `"; "` so the next line remains a separate command. An incomplete
+/// construct gets a space, unless adding `"; "` makes the next line complete (for example
+/// just before `fi` or `done`). Unparseable text keeps its original newlines.
+fn history_line_separator(
+    joined: &str,
+    next_line: &str,
+    parser_options: &brush_parser::ParserOptions,
+) -> Option<&'static str> {
+    let parse = |source: &str| {
+        brush_parser::Parser::new(source.as_bytes(), parser_options)
+            .parse_program()
+            .map(|_| ())
+    };
 
-    for character in line.chars() {
-        if escaped {
-            escaped = false;
-            last_is_operator = false;
-            continue;
-        }
-        if let Some(open) = quote {
-            if character == '\\' && open == '"' {
-                escaped = true;
-            } else if character == open {
-                quote = None;
+    match parse(joined) {
+        Ok(()) => {
+            let tokens = brush_parser::tokenize_str_with_options(
+                joined,
+                &parser_options.tokenizer_options(),
+            )
+            .ok()?;
+            match tokens.last() {
+                Some(brush_parser::Token::Operator(_, _)) => Some(" "),
+                _ => Some("; "),
             }
-            last_is_operator = false;
-            continue;
         }
-        match character {
-            '\\' => {
-                escaped = true;
-                last_is_operator = false;
+        Err(brush_parser::ParseError::ParsingAtEndOfInput) => {
+            let candidate = format!("{joined}; {next_line}");
+            if parse(&candidate).is_ok() {
+                Some("; ")
+            } else {
+                Some(" ")
             }
-            '\'' | '"' => {
-                quote = Some(character);
-                last_is_operator = false;
-            }
-            c if c.is_whitespace() => {}
-            '|' | '&' | ';' | '(' | '{' | '!' => last_is_operator = true,
-            _ => last_is_operator = false,
         }
+        Err(_) => None,
     }
-
-    last_is_operator
 }
 
 /// Returns true if `command` contains a `#` outside quotes. A newline after an inline
@@ -463,6 +439,7 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
             return Err(error::ErrorKind::HistoryNotEnabled.into());
         };
         let mut own_appends = std::mem::take(&mut self.history_own_appends);
+        let filter_own = new_only;
         let imported: Vec<_> = if cursor_reset {
             let imported = crate::history::History::import(&bytes[..complete_end])?;
             let imported_lines: Vec<_> = imported
@@ -499,10 +476,14 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
         // They are already in memory; drop the matching imported copies.
         let mut keep = Vec::new();
         for item in imported {
-            if let Some(index) = own_appends
-                .iter()
-                .position(|own| own.command_line == item.command_line)
-            {
+            let own_index = filter_own
+                .then(|| {
+                    own_appends.iter().position(|(own_path, own)| {
+                        own_path == &path && own.command_line == item.command_line
+                    })
+                })
+                .flatten();
+            if let Some(index) = own_index {
                 own_appends.remove(index);
             } else {
                 keep.push(item);
@@ -592,7 +573,15 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
         };
         let write_timestamps = self.env.is_set("HISTTIMEFORMAT");
 
-        let _lock = crate::history::lock_history_file(history_file_path.as_path())?;
+        let _lock = match crate::history::lock_history_file(history_file_path.as_path()) {
+            Ok(lock) => lock,
+            Err(error) => {
+                if let Some(history) = &mut self.history {
+                    history.mark_dirty_retry();
+                }
+                return Err(error);
+            }
+        };
         let appended: Vec<_> = self
             .history
             .as_ref()
@@ -610,7 +599,11 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
                 history.retain_last(limit);
             }
         }
-        self.history_own_appends.extend(appended);
+        self.history_own_appends.extend(
+            appended
+                .into_iter()
+                .map(|item| (history_file_path.clone(), item)),
+        );
 
         Ok(())
     }
@@ -626,7 +619,15 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
         };
         let write_timestamps = self.env.is_set("HISTTIMEFORMAT");
 
-        let _lock = crate::history::lock_history_file(history_file_path.as_path())?;
+        let _lock = match crate::history::lock_history_file(history_file_path.as_path()) {
+            Ok(lock) => lock,
+            Err(error) => {
+                if let Some(history) = &mut self.history {
+                    history.mark_dirty_retry();
+                }
+                return Err(error);
+            }
+        };
         let pending = self
             .history
             .as_mut()
@@ -717,7 +718,7 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
         let command = if self.options.save_multiline_cmds_in_history
             && !self.options.embed_newlines_in_multiline_cmds_in_history
         {
-            std::borrow::Cow::Owned(join_multiline_command(command))
+            std::borrow::Cow::Owned(join_multiline_command(command, &self.parser_options()))
         } else {
             std::borrow::Cow::Borrowed(command)
         };
@@ -889,6 +890,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn explicit_read_does_not_filter_own_command_from_another_file()
+    -> Result<(), error::Error> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("history");
+        std::fs::write(&path, "")?;
+        let other = dir.path().join("other-history");
+        std::fs::write(&other, ": same\n")?;
+
+        let mut shell = crate::Shell::builder().build().await?;
+        shell.set_env_global(
+            "HISTFILE",
+            ShellVariable::new(path.to_string_lossy().to_string()),
+        )?;
+        shell.history = Some(History::default());
+        shell
+            .history_mut()
+            .expect("history")
+            .add(crate::history::Item::new(": same"))?;
+        shell.append_history()?;
+
+        shell.read_history_file(Some(&other), false)?;
+        let count = shell
+            .history()
+            .expect("history")
+            .iter()
+            .filter(|item| item.command_line == ": same")
+            .count();
+        assert_eq!(count, 2, "explicit full read was filtered");
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn immediate_append_keeps_the_read_cursor_before_external_records()
     -> Result<(), error::Error> {
         let dir = tempfile::tempdir()?;
@@ -939,6 +972,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn lock_failure_marks_pending_entries_for_retry() -> Result<(), error::Error> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("history");
+        std::fs::write(&path, "")?;
+        let lock_path = crate::history::history_lock_path(&path);
+        std::fs::create_dir_all(&lock_path)?;
+
+        let mut shell = crate::Shell::builder().build().await?;
+        shell.set_env_global(
+            "HISTFILE",
+            ShellVariable::new(path.to_string_lossy().to_string()),
+        )?;
+        shell.set_env_global("HISTSIZE", ShellVariable::new("1"))?;
+        shell.history = Some(History::default());
+        shell
+            .history_mut()
+            .expect("history")
+            .add(crate::history::Item::new("first-locked"))?;
+
+        assert!(shell.append_history().is_err());
+        let history = shell.history_mut().expect("history");
+        history.add(crate::history::Item::new("second-locked"))?;
+        history.retain_last_preserving_retry(1);
+        assert!(
+            history
+                .iter()
+                .any(|item| item.command_line == "first-locked"),
+            "lock failure lost the pending command"
+        );
+
+        std::fs::remove_dir(&lock_path)?;
+        shell.append_history()?;
+        let contents = std::fs::read_to_string(&path)?;
+        assert!(contents.contains("first-locked"), "{contents:?}");
+        assert!(contents.contains("second-locked"), "{contents:?}");
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn failed_append_keeps_pending_entries_under_histsize() -> Result<(), error::Error> {
         let dir = tempfile::tempdir()?;
         let path = dir.path().join("history");
@@ -974,16 +1046,6 @@ mod tests {
         assert!(contents.contains("delayed-by-write-error"), "{contents:?}");
         assert!(contents.contains("second-command"), "{contents:?}");
         Ok(())
-    }
-
-    #[test]
-    fn trailing_operators_are_lexical() {
-        assert!(line_ends_with_operator("echo hello|"));
-        assert!(line_ends_with_operator("echo hello |  "));
-        assert!(line_ends_with_operator("echo a &&"));
-        assert!(!line_ends_with_operator("printf ready\\|"));
-        assert!(!line_ends_with_operator("echo '|'"));
-        assert!(!line_ends_with_operator("echo \"|\""));
     }
 
     #[test]

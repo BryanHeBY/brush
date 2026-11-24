@@ -181,7 +181,7 @@ pub struct Shell<SE: extensions::ShellExtensions = extensions::DefaultShellExten
     /// Entries this session appended immediately but that remain ahead of the read cursor.
     /// They are filtered out if a later `history -n` reads the file over them.
     #[cfg_attr(feature = "serde", serde(skip))]
-    history_own_appends: Vec<crate::history::Item>,
+    history_own_appends: Vec<(std::path::PathBuf, crate::history::Item)>,
 }
 
 impl<SE: extensions::ShellExtensions> Clone for Shell<SE> {

@@ -222,6 +222,10 @@ impl History {
     ///
     /// Ordinary unsaved entries remain subject to HISTSIZE; only failed writes are protected.
     pub(crate) fn retain_last_preserving_retry(&mut self, limit: usize) {
+        if self.retry.is_empty() {
+            self.retain_last(limit);
+            return;
+        }
         let excess = self.count().saturating_sub(limit);
         if excess == 0 {
             return;
@@ -1047,7 +1051,7 @@ pub(crate) fn lock_history_file(
 
 /// Returns the lock file path for a history path, resolving symlinks so every spelling of the
 /// same file uses the same lock.
-fn history_lock_path(path: &Path) -> std::path::PathBuf {
+pub(crate) fn history_lock_path(path: &Path) -> std::path::PathBuf {
     use std::hash::{Hash as _, Hasher as _};
 
     let lock_identity = path.canonicalize().unwrap_or_else(|_| {
@@ -1071,7 +1075,11 @@ fn history_lock_path(path: &Path) -> std::path::PathBuf {
     });
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     lock_identity.hash(&mut hasher);
-    std::env::temp_dir().join(format!("brush-history-{:016x}.lock", hasher.finish()))
+    #[cfg(unix)]
+    let lock_directory = Path::new("/tmp");
+    #[cfg(not(unix))]
+    let lock_directory = std::env::temp_dir();
+    lock_directory.join(format!("brush-history-{:016x}.lock", hasher.finish()))
 }
 
 /// Writes `contents` to a temporary file next to the target, then renames it into place.
