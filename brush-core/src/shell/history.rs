@@ -230,6 +230,32 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
         Ok(())
     }
 
+    /// Appends the session's unsaved entries to the history file, regardless of `histappend`.
+    ///
+    /// Immediate appends and share mode must never rewrite the file mid-session: another
+    /// session may have written entries this shell has not seen. The final save decides
+    /// whether the session appends or overwrites.
+    pub fn append_history(&mut self) -> Result<(), error::Error> {
+        if let Some(history_file_path) = self.history_file_path() {
+            let write_timestamps = self.env.is_set("HISTTIMEFORMAT");
+
+            if let Some(history) = &mut self.history {
+                history.flush(
+                    history_file_path.as_path(),
+                    true, /* append */
+                    true, /* unsaved items only */
+                    write_timestamps,
+                )?;
+            }
+
+            if let Ok(metadata) = std::fs::metadata(&history_file_path) {
+                self.history_read_position = Some((history_file_path, metadata.len()));
+            }
+        }
+
+        Ok(())
+    }
+
     /// Saves history back to any backing storage.
     pub fn save_history(&mut self) -> Result<(), error::Error> {
         if let Some(history_file_path) = self.history_file_path() {

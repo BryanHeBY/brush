@@ -213,7 +213,7 @@ impl<'a, IB: InputBackend, SE: brush_core::ShellExtensions> InteractiveShell<'a,
                 {
                     tracing::debug!("couldn't read new history: {e}");
                 }
-                if let Err(e) = shell.save_history() {
+                if let Err(e) = shell.append_history() {
                     tracing::debug!("couldn't append history: {e}");
                 }
             }

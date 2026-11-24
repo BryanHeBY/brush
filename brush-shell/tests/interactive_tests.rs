@@ -1041,6 +1041,56 @@ fn history_survives_closed_pty() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Immediate appends and share mode must append during the session even after
+/// `shopt -u histappend`; only the final save may rewrite the file.
+#[test]
+fn immediate_append_does_not_overwrite_other_sessions() -> anyhow::Result<()> {
+    use std::io::Write as _;
+
+    for setting in ["append-immediately = true", "share = true"] {
+        let home = tempfile::tempdir()?;
+        let config = home.path().join("config.toml");
+        std::fs::write(&config, format!("[history]\n{setting}\n"))?;
+
+        let mut session = start_history_session(Some("basic"), Some(&config), home.path())?;
+        session.expect_prompt()?;
+
+        session.send_line("shopt -u histappend; echo SHOPT-OFF")?;
+        session.expect("SHOPT-OFF")?;
+        session.expect_prompt()?;
+
+        let history_file = home.path().join("history");
+        let mut external = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&history_file)?;
+        external.write_all(b"external-unique\n")?;
+        external.sync_all()?;
+        drop(external);
+
+        session.send_line(": after-switch; echo AFTER-SWITCH")?;
+        session.expect("AFTER-SWITCH")?;
+        session.expect_prompt()?;
+
+        let contents = read_history_file(home.path());
+        assert!(
+            contents.contains("external-unique"),
+            "mid-session append with {setting:?} lost another session's entry: {contents:?}"
+        );
+        assert!(
+            contents.contains(": after-switch"),
+            "mid-session append with {setting:?} did not save its own entry: {contents:?}"
+        );
+
+        session
+            .get_session_mut()
+            .get_process_mut()
+            .kill(Signal::SIGKILL)?;
+    }
+
+    Ok(())
+}
+
 type ShellSession = ReplSession<Session<UnixProcess, LogStream<PtyStream, std::io::Stdout>>>;
 type RawShellSession = ReplSession<Session<UnixProcess, PtyStream>>;
 // N.B. Comment out the above line and uncomment out the following line to disable logging of the
