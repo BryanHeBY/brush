@@ -8,14 +8,26 @@ use std::{
 
 use crate::{error, history::HistoryControl, openfiles, patterns};
 
-/// Joins the lines of a multi-line command the way bash's `cmdhist` does: lines that end a
-/// simple command are separated by `"; "`, while a line ending at a keyword or a continuation
-/// (`do`, `then`, `|`, ...) gets a space instead. Leading whitespace on the next line is kept.
+/// Joins the lines of a multi-line command the way bash's `cmdhist` does.
+///
+/// Newlines inside quotes and here-document bodies are part of the command and are kept as
+/// written. Elsewhere, a line that ends a simple command is followed by `"; "`, a line ending
+/// at a keyword or a continuation by a space, and a backslash-newline is removed. Leading
+/// whitespace on the next line is kept.
 fn join_multiline_command(command: &str) -> String {
+    if command.contains("<<") && !command.contains("<<<") {
+        // Bash keeps a trailing newline as part of a here-document history entry.
+        return format!("{command}\n");
+    }
+    if has_quoted_newline(command) {
+        return command.to_owned();
+    }
+
     let mut joined = String::new();
+    let mut continued = false;
 
     for (index, line) in command.lines().enumerate() {
-        if index > 0 {
+        if index > 0 && !continued {
             let previous = joined.trim_end();
             let last_word = previous.split_whitespace().last().unwrap_or_default();
             let keyword = matches!(
@@ -38,18 +50,58 @@ fn join_multiline_command(command: &str) -> String {
                     | "&"
                     | ";"
             );
-            let continuation = previous.ends_with('\\');
 
-            if keyword || continuation || previous.ends_with(';') {
+            if keyword || previous.ends_with(';') {
                 joined.push(' ');
             } else {
                 joined.push_str("; ");
             }
         }
-        joined.push_str(line);
+
+        if let Some(without_backslash) = line.strip_suffix('\\') {
+            joined.push_str(without_backslash);
+            continued = true;
+        } else {
+            joined.push_str(line);
+            continued = false;
+        }
     }
 
     joined
+}
+
+/// Returns true if a newline occurs while a single- or double-quoted string is open.
+fn has_quoted_newline(command: &str) -> bool {
+    let mut quote = None;
+    let mut escaped = false;
+
+    for character in command.chars() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+
+        match quote {
+            Some(open) => {
+                if character == '\\' && open == '"' {
+                    escaped = true;
+                } else if character == open {
+                    quote = None;
+                } else if character == '\n' {
+                    return true;
+                }
+            }
+            None => {
+                if character == '\'' || character == '"' {
+                    quote = Some(character);
+                } else if character == '\\' {
+                    escaped = true;
+                }
+            }
+        }
+    }
+
+    false
 }
 
 impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
