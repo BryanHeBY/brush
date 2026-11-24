@@ -795,6 +795,32 @@ cases:
       two
       history
 
+  - name: "HISTIGNORE treats an escaped colon as part of the pattern"
+    args: ["-i"]
+    ignore_stderr: true # Ignore job control warnings from interactive shell without a tty
+    env:
+      HISTFILE: "history-file.txt"
+      HISTIGNORE: '*foo\:bar*'
+    stdin: |
+      : foo:bar
+      echo kept
+      history
+      unset HISTFILE
+
+  - name: "history -d uses displayed numbers after HISTSIZE eviction"
+    args: ["-i"]
+    ignore_stderr: true # Ignore job control warnings from interactive shell without a tty
+    env:
+      HISTFILE: "history-file.txt"
+      HISTSIZE: "2"
+    stdin: |
+      : one
+      : two
+      : three
+      history -d 3
+      printf "status=%s\n" "$?"
+      history
+
   - name: "History expansion"
     known_failure: true # brush doesn't implement history expansion
     ignore_stderr: true # Ignore job control warnings from interactive shell without a tty

@@ -118,9 +118,10 @@ impl HistoryCommand {
             }
 
             if offset > 0 {
-                // Convert to 0-based index.
-                let index = (offset - 1) as usize;
-                if !history.remove_nth_item(index) {
+                // The user-visible number includes entries dropped by HISTSIZE, so subtract
+                // the base as well as converting to a 0-based index.
+                let index = offset - 1 - history.base() as i64;
+                if index < 0 || !history.remove_nth_item(index as usize) {
                     writeln!(stderr, "index past end of history")?;
                     return Ok(ExecutionExitCode::InvalidUsage.into());
                 }
