@@ -8,6 +8,17 @@ use crate::error;
 
 pub use std::os::unix::fs::MetadataExt;
 
+/// Creates a new file with private (0600) permissions.
+pub fn create_new_private_file(path: &std::path::Path) -> std::io::Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt as _;
+
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)
+}
+
 /// An exclusive advisory lock on a history file. Dropping it releases the lock.
 pub struct HistoryFileLock(std::fs::File);
 

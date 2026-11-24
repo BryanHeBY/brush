@@ -471,3 +471,12 @@ pub struct HistoryFileLock(std::fs::File);
 pub fn lock_history_file(file: std::fs::File) -> std::io::Result<HistoryFileLock> {
     Ok(HistoryFileLock(file))
 }
+
+/// Creates a new file. The caller is responsible for restrictive permissions where the
+/// platform supports them.
+pub fn create_new_private_file(path: &std::path::Path) -> std::io::Result<std::fs::File> {
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+}

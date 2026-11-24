@@ -851,6 +851,17 @@ cases:
       fc -s 'echo hello'
       unset HISTFILE
 
+  - name: "cmdhist does not treat an escaped pipe as an operator"
+    args: ["-o", "history"]
+    env:
+      HISTFILE: "history-file.txt"
+    stdin: |
+      if true; then
+      printf '%s\n' ready\|
+      fi
+      fc -s 'if true'
+      unset HISTFILE
+
   - name: "History expansion"
     known_failure: true # brush doesn't implement history expansion
     ignore_stderr: true # Ignore job control warnings from interactive shell without a tty

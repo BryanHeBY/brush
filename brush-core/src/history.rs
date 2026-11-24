@@ -28,6 +28,9 @@ pub struct History {
     /// they do in bash after `HISTSIZE` drops an entry.
     #[cfg_attr(feature = "serde", serde(default))]
     base: usize,
+    /// IDs whose append failed and must survive HISTSIZE until they can be retried.
+    #[cfg_attr(feature = "serde", serde(skip))]
+    retry: BTreeSet<ItemId>,
 }
 
 impl History {
@@ -212,6 +215,37 @@ impl History {
             self.retain(|item| !item.dirty);
         }
         dirty
+    }
+
+    /// Trims the oldest entries toward `limit`, preserving entries whose append failed and
+    /// still need a retry.
+    ///
+    /// Ordinary unsaved entries remain subject to HISTSIZE; only failed writes are protected.
+    pub(crate) fn retain_last_preserving_retry(&mut self, limit: usize) {
+        let excess = self.count().saturating_sub(limit);
+        if excess == 0 {
+            return;
+        }
+        let retry = self.retry.clone();
+        let newest = self.items.last().map(|item| item.id);
+        let mut remaining = excess;
+        self.retain(|item| {
+            let protected = retry.contains(&item.id) || Some(item.id) == newest;
+            if remaining > 0 && !protected {
+                remaining -= 1;
+                false
+            } else {
+                true
+            }
+        });
+        self.base += excess - remaining;
+    }
+
+    /// Marks all currently dirty entries as needing a retry after a failed append.
+    pub(crate) fn mark_dirty_retry(&mut self) {
+        for item in self.items.iter().filter(|item| item.dirty) {
+            self.retry.insert(item.id);
+        }
     }
 
     /// Discards the oldest entries until at most `limit` remain.
@@ -1016,7 +1050,25 @@ pub(crate) fn lock_history_file(
 fn history_lock_path(path: &Path) -> std::path::PathBuf {
     use std::hash::{Hash as _, Hasher as _};
 
-    let lock_identity = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let lock_identity = path.canonicalize().unwrap_or_else(|_| {
+        let absolute = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            std::env::current_dir().map_or_else(|_| path.to_path_buf(), |cwd| cwd.join(path))
+        };
+        let Some(file_name) = absolute.file_name() else {
+            return absolute;
+        };
+        let parent = absolute
+            .parent()
+            .and_then(|parent| parent.canonicalize().ok())
+            .unwrap_or_else(|| {
+                absolute
+                    .parent()
+                    .map_or_else(|| Path::new("").to_path_buf(), Path::to_path_buf)
+            });
+        parent.join(file_name)
+    });
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     lock_identity.hash(&mut hasher);
     std::env::temp_dir().join(format!("brush-history-{:016x}.lock", hasher.finish()))
@@ -1039,27 +1091,31 @@ fn atomic_write(path: &Path, contents: &[u8]) -> Result<(), error::Error> {
     let file_name = target.file_name().ok_or_else(|| {
         std::io::Error::new(std::io::ErrorKind::InvalidInput, "invalid history file")
     })?;
-    let mut temp_name = std::ffi::OsString::from(".");
-    temp_name.push(file_name);
-    temp_name.push(format!(".tmp.{}", std::process::id()));
-    let temp_path = target.with_file_name(temp_name);
+
+    let mut created = None;
+    for attempt in 0..100_u32 {
+        let mut temp_name = std::ffi::OsString::from(".");
+        temp_name.push(file_name);
+        temp_name.push(format!(".tmp.{}.{attempt}", std::process::id()));
+        let candidate = target.with_file_name(temp_name);
+        match crate::sys::fs::create_new_private_file(&candidate) {
+            Ok(file) => {
+                created = Some((file, candidate));
+                break;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    let Some((mut file, temp_path)) = created else {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            "could not create a private history temporary file",
+        )
+        .into());
+    };
 
     let result = (|| -> Result<(), error::Error> {
-        let mut options = std::fs::OpenOptions::new();
-        options.write(true).create(true).truncate(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt as _;
-            options.mode(0o600);
-        }
-        let mut file = options.open(&temp_path)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt as _;
-            // The create mode above applies only to a new file; make sure a stale temporary
-            // is private before any history bytes are written to it.
-            file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
-        }
         file.write_all(contents)?;
         if let Some(permissions) = permissions {
             std::fs::set_permissions(&temp_path, permissions)?;
@@ -1070,6 +1126,7 @@ fn atomic_write(path: &Path, contents: &[u8]) -> Result<(), error::Error> {
         Ok(())
     })();
     if result.is_err() {
+        // Only this operation's exclusively-created temporary is removed.
         let _ = std::fs::remove_file(&temp_path);
     }
     result
@@ -1311,6 +1368,50 @@ mod tests {
         history.flush(&path, false, false, false)?;
         assert_eq!(read()?, "old\nnew1\nnew2\n");
 
+        Ok(())
+    }
+
+    #[test]
+    fn relative_lock_path_is_stable_before_and_after_creation() -> Result<(), error::Error> {
+        let cwd = std::env::current_dir()?;
+        let temp = tempfile::Builder::new()
+            .prefix("brush-lock-relative-")
+            .tempdir_in(&cwd)?;
+        let relative = temp
+            .path()
+            .strip_prefix(&cwd)
+            .map_err(std::io::Error::other)?
+            .join("history");
+        let before = history_lock_path(&relative);
+        std::fs::write(temp.path().join("history"), "")?;
+        let after = history_lock_path(&relative);
+        assert_eq!(before, after);
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_temp_creation_is_exclusive_and_private() -> Result<(), error::Error> {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("temp");
+        let mut file = crate::sys::fs::create_new_private_file(&path)?;
+        file.write_all(b"secret")?;
+        file.sync_all()?;
+        drop(file);
+        assert_eq!(
+            std::fs::metadata(&path)?.permissions().mode() & 0o777,
+            0o600
+        );
+
+        let Err(error) = crate::sys::fs::create_new_private_file(&path) else {
+            return Err(
+                std::io::Error::other("create_new must not truncate an existing object").into(),
+            );
+        };
+        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(std::fs::read_to_string(&path)?, "secret");
         Ok(())
     }
 

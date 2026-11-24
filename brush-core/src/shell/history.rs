@@ -51,12 +51,7 @@ fn join_multiline_command(command: &str) -> String {
                     | ";"
             );
 
-            let trailing_operator = previous.ends_with('|')
-                || previous.ends_with('&')
-                || previous.ends_with(';')
-                || previous.ends_with('(')
-                || previous.ends_with('{')
-                || previous.ends_with('!');
+            let trailing_operator = line_ends_with_operator(previous);
             if keyword || trailing_operator {
                 joined.push(' ');
             } else {
@@ -74,6 +69,46 @@ fn join_multiline_command(command: &str) -> String {
     }
 
     joined
+}
+
+/// Returns true if the line's last significant, unquoted, unescaped character is a shell
+/// operator that continues the command across a newline.
+fn line_ends_with_operator(line: &str) -> bool {
+    let mut quote = None;
+    let mut escaped = false;
+    let mut last_is_operator = false;
+
+    for character in line.chars() {
+        if escaped {
+            escaped = false;
+            last_is_operator = false;
+            continue;
+        }
+        if let Some(open) = quote {
+            if character == '\\' && open == '"' {
+                escaped = true;
+            } else if character == open {
+                quote = None;
+            }
+            last_is_operator = false;
+            continue;
+        }
+        match character {
+            '\\' => {
+                escaped = true;
+                last_is_operator = false;
+            }
+            '\'' | '"' => {
+                quote = Some(character);
+                last_is_operator = false;
+            }
+            c if c.is_whitespace() => {}
+            '|' | '&' | ';' | '(' | '{' | '!' => last_is_operator = true,
+            _ => last_is_operator = false,
+        }
+    }
+
+    last_is_operator
 }
 
 /// Returns true if `command` contains a `#` outside quotes. A newline after an inline
@@ -353,6 +388,10 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
         clippy::cast_possible_truncation,
         reason = "history offsets are file lengths, which fit in usize on supported targets"
     )]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "a flat incremental-read state machine"
+    )]
     pub fn read_history_file(
         &mut self,
         path: Option<&Path>,
@@ -423,7 +462,8 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
         let Some(history) = &mut self.history else {
             return Err(error::ErrorKind::HistoryNotEnabled.into());
         };
-        if cursor_reset {
+        let mut own_appends = std::mem::take(&mut self.history_own_appends);
+        let imported: Vec<_> = if cursor_reset {
             let imported = crate::history::History::import(&bytes[..complete_end])?;
             let imported_lines: Vec<_> = imported
                 .iter()
@@ -448,15 +488,33 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
                     skip = count;
                 }
             }
-            for item in imported.iter().skip(skip).cloned() {
-                history.add(item)?;
-            }
+            imported.iter().skip(skip).cloned().collect()
         } else {
-            history.append_from(&new_bytes[..complete_end])?;
+            crate::history::History::import(&new_bytes[..complete_end])?
+                .iter()
+                .cloned()
+                .collect()
+        };
+        // A later `history -n` can read over records this session appended immediately.
+        // They are already in memory; drop the matching imported copies.
+        let mut keep = Vec::new();
+        for item in imported {
+            if let Some(index) = own_appends
+                .iter()
+                .position(|own| own.command_line == item.command_line)
+            {
+                own_appends.remove(index);
+            } else {
+                keep.push(item);
+            }
+        }
+        for item in keep {
+            history.add(item)?;
         }
         if let Some(limit) = size_limit {
-            history.retain_last(limit);
+            history.retain_last_preserving_retry(limit);
         }
+        self.history_own_appends = own_appends;
         self.history_read_position = Some((
             path,
             (offset + complete_end) as u64,
@@ -535,10 +593,24 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
         let write_timestamps = self.env.is_set("HISTTIMEFORMAT");
 
         let _lock = crate::history::lock_history_file(history_file_path.as_path())?;
+        let appended: Vec<_> = self
+            .history
+            .as_ref()
+            .map(|history| history.iter().filter(|item| item.dirty).cloned().collect())
+            .unwrap_or_default();
+        let size_limit = self.history_size_limit();
         if let Some(history) = &mut self.history {
-            history.append_unsaved(history_file_path.as_path(), write_timestamps)?;
+            if let Err(error) =
+                history.append_unsaved(history_file_path.as_path(), write_timestamps)
+            {
+                history.mark_dirty_retry();
+                return Err(error);
+            }
+            if let Some(limit) = size_limit {
+                history.retain_last(limit);
+            }
         }
-        self.remember_history_file_end();
+        self.history_own_appends.extend(appended);
 
         Ok(())
     }
@@ -576,7 +648,12 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
 
         let size_limit = self.history_size_limit();
         if let Some(history) = &mut self.history {
-            history.append_unsaved(history_file_path.as_path(), write_timestamps)?;
+            if let Err(error) =
+                history.append_unsaved(history_file_path.as_path(), write_timestamps)
+            {
+                history.mark_dirty_retry();
+                return Err(error);
+            }
             if let Some(limit) = size_limit {
                 history.retain_last(limit);
             }
@@ -686,7 +763,7 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
             dirty: true,
         })?;
         if let Some(limit) = size_limit {
-            history.retain_last(limit);
+            history.retain_last_preserving_retry(limit);
         }
 
         Ok(())
@@ -809,6 +886,104 @@ mod tests {
         assert!(contents.contains("external"), "{contents:?}");
         assert!(contents.contains("local-only"), "{contents:?}");
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn immediate_append_keeps_the_read_cursor_before_external_records()
+    -> Result<(), error::Error> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("history");
+        std::fs::write(&path, "old-entry\n")?;
+
+        let loaded = History::import(std::fs::File::open(&path)?)?;
+        let mut shell = crate::Shell::builder().build().await?;
+        shell.set_env_global(
+            "HISTFILE",
+            ShellVariable::new(path.to_string_lossy().to_string()),
+        )?;
+        shell.history = Some(loaded);
+        shell.remember_history_file_position();
+
+        shell
+            .history_mut()
+            .expect("history")
+            .add(crate::history::Item::new("local-entry"))?;
+        shell.append_history()?;
+
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)?
+            .write_all(b"external-entry\n")?;
+        shell.read_new_history()?;
+
+        let lines: Vec<_> = shell
+            .history()
+            .expect("history")
+            .iter()
+            .map(|item| item.command_line.as_str())
+            .collect();
+        assert_eq!(
+            lines
+                .iter()
+                .filter(|line| **line == "external-entry")
+                .count(),
+            1,
+            "{lines:?}"
+        );
+        assert_eq!(
+            lines.iter().filter(|line| **line == "local-entry").count(),
+            1,
+            "{lines:?}"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn failed_append_keeps_pending_entries_under_histsize() -> Result<(), error::Error> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("history");
+        std::fs::create_dir(&path)?;
+
+        let mut shell = crate::Shell::builder().build().await?;
+        shell.set_env_global(
+            "HISTFILE",
+            ShellVariable::new(path.to_string_lossy().to_string()),
+        )?;
+        shell.set_env_global("HISTSIZE", ShellVariable::new("1"))?;
+        shell.history = Some(History::default());
+        shell
+            .history_mut()
+            .expect("history")
+            .add(crate::history::Item::new("delayed-by-write-error"))?;
+
+        assert!(shell.append_history().is_err());
+
+        let history = shell.history_mut().expect("history");
+        history.add(crate::history::Item::new("second-command"))?;
+        history.retain_last_preserving_retry(1);
+        assert!(
+            history
+                .iter()
+                .any(|item| item.command_line == "delayed-by-write-error"),
+            "HISTSIZE discarded the pending command"
+        );
+
+        std::fs::remove_dir(&path)?;
+        shell.append_history()?;
+        let contents = std::fs::read_to_string(&path)?;
+        assert!(contents.contains("delayed-by-write-error"), "{contents:?}");
+        assert!(contents.contains("second-command"), "{contents:?}");
+        Ok(())
+    }
+
+    #[test]
+    fn trailing_operators_are_lexical() {
+        assert!(line_ends_with_operator("echo hello|"));
+        assert!(line_ends_with_operator("echo hello |  "));
+        assert!(line_ends_with_operator("echo a &&"));
+        assert!(!line_ends_with_operator("printf ready\\|"));
+        assert!(!line_ends_with_operator("echo '|'"));
+        assert!(!line_ends_with_operator("echo \"|\""));
     }
 
     #[test]

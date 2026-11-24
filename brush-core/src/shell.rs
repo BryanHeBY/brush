@@ -177,6 +177,11 @@ pub struct Shell<SE: extensions::ShellExtensions = extensions::DefaultShellExten
     /// Byte offset already imported from the history file, for `history -n` and share mode.
     #[cfg_attr(feature = "serde", serde(skip))]
     history_read_position: Option<(std::path::PathBuf, u64, Option<HistoryFileId>, u64)>,
+
+    /// Entries this session appended immediately but that remain ahead of the read cursor.
+    /// They are filtered out if a later `history -n` reads the file over them.
+    #[cfg_attr(feature = "serde", serde(skip))]
+    history_own_appends: Vec<crate::history::Item>,
 }
 
 impl<SE: extensions::ShellExtensions> Clone for Shell<SE> {
@@ -223,6 +228,7 @@ impl<SE: extensions::ShellExtensions> Clone for Shell<SE> {
             key_bindings: self.key_bindings.clone(),
             history: self.history.clone(),
             history_read_position: self.history_read_position.clone(),
+            history_own_appends: self.history_own_appends.clone(),
             depth: self.depth + 1,
             command_number: self.command_number,
         }

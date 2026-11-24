@@ -283,6 +283,7 @@ impl<SE: extensions::ShellExtensions> Default for Shell<SE> {
             key_bindings: None,
             history: None,
             history_read_position: None,
+            history_own_appends: Vec::new(),
         }
     }
 }
