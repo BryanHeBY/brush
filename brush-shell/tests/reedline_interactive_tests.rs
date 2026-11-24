@@ -416,7 +416,36 @@ fn command_can_read_input_after_editor_returns() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Like readline, completion sees the whole line, not just the text before the cursor:/// Like readline, completion sees the whole line, not just the text before the cursor:/// Like readline, completion sees the whole line, not just the text before the cursor:/// Like readline, completion sees the whole line, not just the text before the cursor:/// Like readline, completion sees the whole line, not just the text before the cursor:/// Like readline, completion sees the whole line, not just the text before the cursor:/// Like readline, completion sees the whole line, not just the text before the cursor:
+/// The shared fixture must remove its temporary HOME when the session is dropped.
+#[test]
+fn fixture_home_is_removed_when_the_session_ends() -> anyhow::Result<()> {
+    let outside = tempfile::tempdir()?;
+    let record = outside.path().join("home-path");
+    let mut session = start_reedline_session()?;
+    expect_next_prompt(&mut session, 0)?;
+    session.send_line(format!(
+        "printf '%s\\n' \"$HOME\" > {}",
+        brush_core::escape::single_quote(record.to_str().context("record path")?)
+    ))?;
+    expect_next_prompt(&mut session, 0)?;
+    let home = std::path::PathBuf::from(std::fs::read_to_string(&record)?.trim());
+    assert!(
+        home.exists(),
+        "fixture home does not exist: {}",
+        home.display()
+    );
+    session.send("exit\r")?;
+    session.expect(expectrl::Eof)?;
+    drop(session);
+    assert!(
+        !home.exists(),
+        "fixture left its home behind: {}",
+        home.display()
+    );
+    Ok(())
+}
+
+/// Like readline, completion sees the whole line, not just the text before the cursor:/// Like readline, completion sees the whole line, not just the text before the cursor:/// Like readline, completion sees the whole line, not just the text before the cursor:/// Like readline, completion sees the whole line, not just the text before the cursor:/// Like readline, completion sees the whole line, not just the text before the cursor:/// Like readline, completion sees the whole line, not just the text before the cursor:/// Like readline, completion sees the whole line, not just the text before the cursor:/// Like readline, completion sees the whole line, not just the text before the cursor:
 /// e.g. `COMP_WORDS` includes words after it.
 #[test]
 fn completion_sees_text_after_cursor() -> anyhow::Result<()> {
