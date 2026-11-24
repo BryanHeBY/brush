@@ -120,7 +120,44 @@ fn unicode_history_search_recalls_on_character_boundary() -> anyhow::Result<()> 
     Ok(())
 }
 
-/// An rc file may export a new INPUTRC. The first prompt must use it, but a `bind` in the
+/// Case-insensitive search must use the same whole-string folding for filtering and for the
+/// cursor boundary; Greek final sigma lowercases differently from a per-character fold.
+#[test]
+fn greek_final_sigma_history_search() -> anyhow::Result<()> {
+    let temp = tempfile::tempdir()?;
+    let history = temp.path().join("history");
+    std::fs::write(&history, ": ΟΣ\n")?;
+    let inputrc = temp.path().join("inputrc");
+    std::fs::write(
+        &inputrc,
+        "set search-ignore-case on\n\"\\C-t\": history-search-backward\n",
+    )?;
+
+    let mut session = start_reedline_session_with(|cmd| {
+        cmd.env("HOME", temp.path())
+            .env("INPUTRC", &inputrc)
+            .env("HISTFILE", &history);
+    })?;
+    expect_next_prompt(&mut session, 0)?;
+
+    session.send(": ος")?;
+    session.send("\x14")?;
+    session.send("\x05")?;
+    session
+        .expect(": ΟΣ")
+        .context("Greek final sigma did not match case-insensitively")?;
+    session.send("\r")?;
+    expect_next_prompt(&mut session, 0)?;
+
+    session.send_line("echo GREEK_ALIVE")?;
+    session
+        .expect("GREEK_ALIVE")
+        .context("shell did not survive Greek history recall")?;
+
+    Ok(())
+}
+
+/// An rc file may export a new INPUTRC./// An rc file may export a new INPUTRC. The first prompt must use it, but a `bind` in the
 /// rc is applied after that file is loaded and keeps priority.
 #[test]
 fn rcfile_exported_inputrc_is_used_at_the_first_prompt() -> anyhow::Result<()> {

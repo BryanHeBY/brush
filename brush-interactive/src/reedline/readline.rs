@@ -282,13 +282,13 @@ fn matched_prefix_len(candidate: &str, prefix: &str, ignore_case: bool) -> Optio
     if lowercase_prefix.is_empty() {
         return Some(0);
     }
-    let mut lowercase = String::new();
+    // Use the same whole-string lowercasing as the candidate filter. `char::to_lowercase`
+    // alone is not equivalent: Greek final sigma depends on its position in the word.
     for (index, character) in candidate.char_indices() {
-        lowercase.extend(character.to_lowercase());
+        let boundary = index + character.len_utf8();
+        let lowercase = candidate[..boundary].to_lowercase();
         if lowercase.len() >= lowercase_prefix.len() {
-            return lowercase
-                .starts_with(&lowercase_prefix)
-                .then_some(index + character.len_utf8());
+            return lowercase.starts_with(&lowercase_prefix).then_some(boundary);
         }
     }
     None
@@ -972,6 +972,7 @@ mod tests {
         assert_eq!(matched_prefix_len(": K界", ": K", true), Some(3));
         assert_eq!(matched_prefix_len(": k界", ": K", true), Some(3));
         assert_eq!(matched_prefix_len("İ", "i", true), Some(2));
+        assert_eq!(matched_prefix_len(": ΟΣ", ": ος", true), Some(6));
         assert_eq!(matched_prefix_len("界", "k", true), None);
         assert_eq!(matched_prefix_len("abc", "", true), Some(0));
     }
