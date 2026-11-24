@@ -77,6 +77,10 @@ fn bound_key_runs_command_and_shell_survives() -> anyhow::Result<()> {
 /// Case-insensitive history search must place the cursor on a character boundary in the
 /// recalled text even when lowercasing changes the query's byte length (`K` -> `k`).
 #[test]
+#[allow(
+    clippy::unicode_not_nfc,
+    reason = "Kelvin sign exercises different-byte case folding"
+)]
 fn unicode_history_search_recalls_on_character_boundary() -> anyhow::Result<()> {
     let temp = tempfile::tempdir()?;
     let history = temp.path().join("history");
@@ -226,6 +230,10 @@ fn mark_directories_off_keeps_filename_escaping() -> anyhow::Result<()> {
 /// Terminal-control sequences must go to the controlling terminal, not into a redirected
 /// stdout. Herdr still needs its OSC 7 directory update.
 #[test]
+#[allow(
+    clippy::multiple_unsafe_ops_per_block,
+    reason = "pre-exec setup and controlling-terminal ioctl are one operation"
+)]
 fn redirected_stdout_does_not_receive_herdr_osc7() -> anyhow::Result<()> {
     use std::io::Write as _;
     use std::os::fd::AsRawFd as _;
@@ -269,7 +277,9 @@ fn redirected_stdout_does_not_receive_herdr_osc7() -> anyhow::Result<()> {
     }
     let mut child = cmd.spawn()?;
     let mut master = std::fs::File::from(pty.master);
+    // SAFETY: the master descriptor is open and owned by this test.
     let flags = unsafe { libc::fcntl(master.as_raw_fd(), libc::F_GETFL) };
+    // SAFETY: the master descriptor is open and owned by this test.
     unsafe {
         libc::fcntl(master.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK);
     }

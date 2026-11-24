@@ -957,6 +957,10 @@ impl<SE: brush_core::ShellExtensions> reedline::Menu for ActionMenu<SE> {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unicode_not_nfc,
+    reason = "Kelvin sign exercises different-byte case folding"
+)]
 mod tests {
     use super::matched_prefix_len;
 
