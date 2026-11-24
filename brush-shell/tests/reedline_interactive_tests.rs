@@ -615,7 +615,10 @@ fn readline_file_behavior_matches_bash() -> anyhow::Result<()> {
             let session = expectrl::Session::spawn(cmd)?;
             let mut session = expectrl::session::log(session, std::io::stdout())?;
             session.set_expect_timeout(Some(Duration::from_secs(15)));
-            session
+            IsolatedSession {
+                session,
+                _home: tempfile::tempdir()?,
+            }
         } else {
             start_reedline_session_with(configured)?
         };
@@ -1650,6 +1653,27 @@ fn for_readline_shell_with_config(
 
 type ShellSession = Session<UnixProcess, LogStream<PtyStream, std::io::Stdout>>;
 
+/// Owns the fixture's temporary HOME for as long as the session, so it is removed when the
+/// test drops the session while still allowing per-test environment overrides.
+struct IsolatedSession {
+    session: ShellSession,
+    _home: tempfile::TempDir,
+}
+
+impl std::ops::Deref for IsolatedSession {
+    type Target = ShellSession;
+
+    fn deref(&self) -> &Self::Target {
+        &self.session
+    }
+}
+
+impl std::ops::DerefMut for IsolatedSession {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.session
+    }
+}
+
 #[cfg(target_os = "linux")]
 fn expect_with_terminal_answers(session: &mut ShellSession, expected: &str) -> anyhow::Result<()> {
     loop {
@@ -1682,13 +1706,13 @@ fn expect_next_prompt(session: &mut ShellSession, mut withhold: usize) -> anyhow
     }
 }
 
-fn start_reedline_session() -> anyhow::Result<ShellSession> {
+fn start_reedline_session() -> anyhow::Result<IsolatedSession> {
     start_reedline_session_with(|_| {})
 }
 
 fn start_reedline_session_with(
     configure: impl FnOnce(&mut std::process::Command),
-) -> anyhow::Result<ShellSession> {
+) -> anyhow::Result<IsolatedSession> {
     let shell_path = assert_cmd::cargo::cargo_bin!("brush");
 
     let mut cmd = std::process::Command::new(shell_path);
@@ -1706,12 +1730,12 @@ fn start_reedline_session_with(
     // Isolate every test from the caller's shell configuration. Individual tests can still
     // override these with `configure`, but the default must not read the developer's history
     // or key bindings.
-    let test_home = tempfile::tempdir()?.keep();
-    let test_inputrc = test_home.join("inputrc");
+    let test_home = tempfile::tempdir()?;
+    let test_inputrc = test_home.path().join("inputrc");
     std::fs::write(&test_inputrc, "")?;
-    cmd.env("HOME", &test_home)
+    cmd.env("HOME", test_home.path())
         .env("INPUTRC", &test_inputrc)
-        .env("HISTFILE", test_home.join("history"));
+        .env("HISTFILE", test_home.path().join("history"));
     configure(&mut cmd);
 
     let session = expectrl::session::Session::spawn(cmd)?;
@@ -1723,5 +1747,8 @@ fn start_reedline_session_with(
     // several in a row when the terminal never answers.
     session.set_expect_timeout(Some(Duration::from_secs(15)));
 
-    Ok(session)
+    Ok(IsolatedSession {
+        session,
+        _home: test_home,
+    })
 }
