@@ -972,7 +972,9 @@ fn add_imported(
 #[allow(clippy::panic_in_result_fn, reason = "assertions in a fallible test")]
 mod tests {
     use super::*;
-    use crate::history_file::{lock_path, lock_path as history_lock_path};
+    #[cfg(unix)]
+    use crate::history_file::lock_path;
+    use crate::history_file::lock_path as history_lock_path;
 
     fn history(lines: &[&str]) -> Result<History, error::Error> {
         let mut history = History::default();

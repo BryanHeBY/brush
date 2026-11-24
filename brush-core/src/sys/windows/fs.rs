@@ -317,6 +317,120 @@ pub fn normalize_path_separators(s: &str) -> std::borrow::Cow<'_, str> {
     }
 }
 
+/// An exclusive Windows lock on a history file.
+pub struct HistoryFileLock(std::fs::File);
+
+impl Drop for HistoryFileLock {
+    fn drop(&mut self) {
+        use std::os::windows::io::AsRawHandle as _;
+
+        let mut overlapped = windows_sys::Win32::System::IO::OVERLAPPED::default();
+        // SAFETY: the file handle is valid for the lifetime of the guard, and the overlapped
+        // structure is initialized for an offset-0 whole-file unlock.
+        unsafe {
+            let _ = windows_sys::Win32::Storage::FileSystem::UnlockFileEx(
+                self.0.as_raw_handle() as windows_sys::Win32::Foundation::HANDLE,
+                0,
+                u32::MAX,
+                u32::MAX,
+                &raw mut overlapped,
+            );
+        }
+    }
+}
+
+/// Takes an exclusive Windows file lock, blocking until it is available.
+pub fn lock_history_file(file: std::fs::File) -> std::io::Result<HistoryFileLock> {
+    use std::os::windows::io::AsRawHandle as _;
+
+    let mut overlapped = windows_sys::Win32::System::IO::OVERLAPPED::default();
+    // SAFETY: the handle comes from an open file and the overlapped structure is initialized.
+    let result = unsafe {
+        windows_sys::Win32::Storage::FileSystem::LockFileEx(
+            file.as_raw_handle() as windows_sys::Win32::Foundation::HANDLE,
+            windows_sys::Win32::Storage::FileSystem::LOCKFILE_EXCLUSIVE_LOCK,
+            0,
+            u32::MAX,
+            u32::MAX,
+            &raw mut overlapped,
+        )
+    };
+    if result == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(HistoryFileLock(file))
+}
+
+/// Returns the volume serial and file ID for an open file, including on `ReFS`.
+pub(crate) fn history_file_identity(file: &std::fs::File) -> std::io::Result<(u64, u128)> {
+    use std::os::windows::io::AsRawHandle as _;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_ID_INFO, FileIdInfo, GetFileInformationByHandleEx,
+    };
+
+    let mut info = FILE_ID_INFO::default();
+    let size = u32::try_from(std::mem::size_of_val(&info)).map_err(std::io::Error::other)?;
+    // SAFETY: FileIdInfo writes one FILE_ID_INFO; the handle and output buffer are live.
+    let result = unsafe {
+        GetFileInformationByHandleEx(
+            file.as_raw_handle(),
+            FileIdInfo,
+            (&raw mut info).cast(),
+            size,
+        )
+    };
+    if result == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok((
+        info.VolumeSerialNumber,
+        u128::from_le_bytes(info.FileId.Identifier),
+    ))
+}
+
+/// Renames `temp` over `target`, replacing an existing file.
+pub fn replace_file(temp: &std::path::Path, target: &std::path::Path) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt as _;
+
+    let temp: Vec<u16> = temp
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let target: Vec<u16> = target
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    // SAFETY: both paths are NUL-terminated UTF-16 buffers that live for the call.
+    let result = unsafe {
+        windows_sys::Win32::Storage::FileSystem::MoveFileExW(
+            temp.as_ptr(),
+            target.as_ptr(),
+            windows_sys::Win32::Storage::FileSystem::MOVEFILE_REPLACE_EXISTING
+                | windows_sys::Win32::Storage::FileSystem::MOVEFILE_WRITE_THROUGH,
+        )
+    };
+    if result == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// Creates a new file. The caller is responsible for restrictive permissions where the
+/// platform supports them.
+pub fn create_new_private_file(path: &std::path::Path) -> std::io::Result<std::fs::File> {
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+}
+
+/// Preserves a file's group across an atomic replacement where the platform has POSIX groups.
+pub const fn set_file_group(_file: &std::fs::File, _gid: u32) -> std::io::Result<()> {
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -461,91 +575,4 @@ mod tests {
         let path = PathBuf::from(r"C:\__brush_test_definitely_missing__");
         assert!(resolve_executable(path).is_none());
     }
-}
-
-/// An exclusive Windows lock on a history file.
-pub struct HistoryFileLock(std::fs::File);
-
-impl Drop for HistoryFileLock {
-    fn drop(&mut self) {
-        use std::os::windows::io::AsRawHandle as _;
-
-        let mut overlapped = unsafe { std::mem::zeroed() };
-        // SAFETY: the file handle is valid for the lifetime of the guard, and the overlapped
-        // structure is initialized for an offset-0 whole-file unlock.
-        unsafe {
-            let _ = windows_sys::Win32::Storage::FileSystem::UnlockFileEx(
-                self.0.as_raw_handle() as windows_sys::Win32::Foundation::HANDLE,
-                0,
-                u32::MAX,
-                u32::MAX,
-                &mut overlapped,
-            );
-        }
-    }
-}
-
-/// Takes an exclusive Windows file lock, blocking until it is available.
-pub fn lock_history_file(file: std::fs::File) -> std::io::Result<HistoryFileLock> {
-    use std::os::windows::io::AsRawHandle as _;
-
-    let mut overlapped = unsafe { std::mem::zeroed() };
-    // SAFETY: the handle comes from an open file and the overlapped structure is initialized.
-    let result = unsafe {
-        windows_sys::Win32::Storage::FileSystem::LockFileEx(
-            file.as_raw_handle() as windows_sys::Win32::Foundation::HANDLE,
-            windows_sys::Win32::Storage::FileSystem::LOCKFILE_EXCLUSIVE_LOCK,
-            0,
-            u32::MAX,
-            u32::MAX,
-            &mut overlapped,
-        )
-    };
-    if result == 0 {
-        return Err(std::io::Error::last_os_error());
-    }
-    Ok(HistoryFileLock(file))
-}
-
-/// Renames `temp` over `target`, replacing an existing file.
-pub fn replace_file(temp: &std::path::Path, target: &std::path::Path) -> std::io::Result<()> {
-    use std::os::windows::ffi::OsStrExt as _;
-
-    let temp: Vec<u16> = temp
-        .as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect();
-    let target: Vec<u16> = target
-        .as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect();
-    // SAFETY: both paths are NUL-terminated UTF-16 buffers that live for the call.
-    let result = unsafe {
-        windows_sys::Win32::Storage::FileSystem::MoveFileExW(
-            temp.as_ptr(),
-            target.as_ptr(),
-            windows_sys::Win32::Storage::FileSystem::MOVEFILE_REPLACE_EXISTING
-                | windows_sys::Win32::Storage::FileSystem::MOVEFILE_WRITE_THROUGH,
-        )
-    };
-    if result == 0 {
-        return Err(std::io::Error::last_os_error());
-    }
-    Ok(())
-}
-
-/// Creates a new file. The caller is responsible for restrictive permissions where the
-/// platform supports them.
-pub fn create_new_private_file(path: &std::path::Path) -> std::io::Result<std::fs::File> {
-    std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(path)
-}
-
-/// Preserves a file's group across an atomic replacement where the platform has POSIX groups.
-pub fn set_file_group(_file: &std::fs::File, _gid: u32) -> std::io::Result<()> {
-    Ok(())
 }

@@ -14,7 +14,10 @@ use crate::{error, history::Item};
 #[cfg(unix)]
 pub(crate) type Identity = (u64, u64);
 /// Identity of a history file, used to detect replacement.
-#[cfg(not(unix))]
+#[cfg(windows)]
+pub(crate) type Identity = (u64, u128);
+/// Identity is not available on the remaining platforms.
+#[cfg(not(any(unix, windows)))]
 pub(crate) type Identity = ();
 
 /// A byte cursor into a history file.
@@ -101,18 +104,21 @@ pub(crate) fn complete_record_end(bytes: &[u8]) -> usize {
     }
 }
 
-/// Returns the identity used to detect a replaced history file.
-pub(crate) fn file_identity(metadata: &std::fs::Metadata) -> Identity {
+/// Gets metadata and identity from the same open handle, not two snapshots of a path.
+pub(crate) fn file_metadata(
+    file: &std::fs::File,
+) -> std::io::Result<(std::fs::Metadata, Option<Identity>)> {
+    let metadata = file.metadata()?;
     #[cfg(unix)]
-    {
+    let identity = {
         use std::os::unix::fs::MetadataExt as _;
-        (metadata.dev(), metadata.ino())
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = metadata;
-        ()
-    }
+        Some((metadata.dev(), metadata.ino()))
+    };
+    #[cfg(windows)]
+    let identity = crate::sys::fs::history_file_identity(file).ok();
+    #[cfg(not(any(unix, windows)))]
+    let identity = None;
+    Ok((metadata, identity))
 }
 
 /// Keeps the last `max_items` entries in a history file's raw bytes.

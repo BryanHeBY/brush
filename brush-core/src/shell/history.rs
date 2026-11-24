@@ -10,7 +10,7 @@ use crate::{
     error,
     history::HistoryControl,
     history_file::{
-        OwnAppend, ReadPosition, complete_record_end, file_identity, lock_history_file,
+        OwnAppend, ReadPosition, complete_record_end, file_metadata, lock_history_file,
         tail_checksum,
     },
     openfiles, patterns,
@@ -365,8 +365,7 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
         };
 
         let mut file = std::fs::File::open(&path)?;
-        let metadata = file.metadata()?;
-        let file_id = Some(file_identity(&metadata));
+        let (metadata, file_id) = file_metadata(&file)?;
         let length = metadata.len();
 
         let stored = if new_only {
@@ -492,13 +491,16 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
         let Some(path) = self.history_file_path() else {
             return;
         };
-        let Ok(metadata) = std::fs::metadata(&path) else {
+        let Ok(mut file) = std::fs::File::open(&path) else {
             return;
         };
-        let file_id = Some(file_identity(&metadata));
-        let Ok(bytes) = std::fs::read(&path) else {
+        let Ok((_metadata, file_id)) = file_metadata(&file) else {
             return;
         };
+        let mut bytes = Vec::new();
+        if file.read_to_end(&mut bytes).is_err() {
+            return;
+        }
         let complete_end = complete_record_end(&bytes);
         self.history_file_state.read_position = Some(ReadPosition {
             path,
@@ -513,19 +515,26 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
         let Some(path) = self.history_file_path() else {
             return;
         };
-        let Ok(metadata) = std::fs::metadata(&path) else {
+        let Ok(mut file) = std::fs::File::open(&path) else {
             return;
         };
-        let file_id = Some(file_identity(&metadata));
+        let Ok((metadata, file_id)) = file_metadata(&file) else {
+            return;
+        };
         let offset = metadata.len();
-        let checksum = (|| {
-            let mut file = std::fs::File::open(&path)?;
-            file.seek(SeekFrom::Start(offset.saturating_sub(256)))?;
-            let mut tail = Vec::new();
-            file.read_to_end(&mut tail)?;
-            Ok::<_, std::io::Error>(tail_checksum(&tail))
-        })()
-        .unwrap_or_default();
+        let start = offset.saturating_sub(256);
+        let mut tail = Vec::new();
+        if file.seek(SeekFrom::Start(start)).is_err()
+            || file
+                .by_ref()
+                .take(offset - start)
+                .read_to_end(&mut tail)
+                .is_err()
+            || tail.len() as u64 != offset - start
+        {
+            return;
+        }
+        let checksum = tail_checksum(&tail);
         self.history_file_state.read_position = Some(ReadPosition {
             path,
             offset,
