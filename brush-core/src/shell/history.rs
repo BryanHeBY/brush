@@ -19,7 +19,7 @@ fn join_multiline_command(command: &str) -> String {
         // Bash keeps a trailing newline as part of a here-document history entry.
         return format!("{command}\n");
     }
-    if has_quoted_newline(command) {
+    if has_quoted_newline(command) || has_unquoted_hash(command) {
         return command.to_owned();
     }
 
@@ -68,6 +68,41 @@ fn join_multiline_command(command: &str) -> String {
     }
 
     joined
+}
+
+/// Returns true if `command` contains a `#` outside quotes. A newline after an inline
+/// comment is a shell syntax boundary; joining it with `; ` would put the following command
+/// inside the comment.
+fn has_unquoted_hash(command: &str) -> bool {
+    let mut quote = None;
+    let mut escaped = false;
+
+    for character in command.chars() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        match quote {
+            Some(open) => {
+                if character == '\\' && open == '"' {
+                    escaped = true;
+                } else if character == open {
+                    quote = None;
+                }
+            }
+            None => {
+                if character == '#' {
+                    return true;
+                }
+                if character == '\'' || character == '"' {
+                    quote = Some(character);
+                } else if character == '\\' {
+                    escaped = true;
+                }
+            }
+        }
+    }
+    false
 }
 
 /// Returns true if a newline occurs while a single- or double-quoted string is open.
