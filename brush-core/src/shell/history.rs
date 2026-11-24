@@ -437,20 +437,22 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
     /// session may have written entries this shell has not seen. The final save decides
     /// whether the session appends or overwrites.
     pub fn append_history(&mut self) -> Result<(), error::Error> {
-        if let Some(history_file_path) = self.history_file_path() {
-            let write_timestamps = self.env.is_set("HISTTIMEFORMAT");
+        let Some(history_file_path) = self.history_file_path() else {
+            return Ok(());
+        };
+        let write_timestamps = self.env.is_set("HISTTIMEFORMAT");
 
-            if let Some(history) = &mut self.history {
-                history.flush(
-                    history_file_path.as_path(),
-                    true, /* append */
-                    true, /* unsaved items only */
-                    write_timestamps,
-                )?;
-            }
-
-            self.remember_history_file_end();
+        // Read, append, and advance the cursor under one lock. Otherwise another session can
+        // append after our read and before our write, and moving the cursor to the end would
+        // make the next read skip that record.
+        let _lock = crate::history::lock_history_file(history_file_path.as_path())?;
+        if history_file_path.exists() {
+            self.read_history_file(Some(history_file_path.as_path()), true)?;
         }
+        if let Some(history) = &mut self.history {
+            history.append_unsaved(history_file_path.as_path(), write_timestamps)?;
+        }
+        self.remember_history_file_end();
 
         Ok(())
     }
@@ -557,6 +559,58 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
         if let Some(limit) = size_limit {
             history.retain_last(limit);
         }
+
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{history::History, variables::ShellVariable};
+    use std::io::Write as _;
+
+    #[tokio::test]
+    async fn append_reads_foreign_entries_before_advancing_the_cursor() -> Result<(), error::Error>
+    {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("history");
+        std::fs::write(&path, "foreign-before-append\n")?;
+
+        let mut shell = crate::Shell::builder().build().await?;
+        shell.set_env_global(
+            "HISTFILE",
+            ShellVariable::new(path.to_string_lossy().to_string()),
+        )?;
+        shell.history = Some(History::default());
+        shell
+            .history_mut()
+            .expect("history")
+            .add(crate::history::Item::new("mine"))?;
+
+        shell.append_history()?;
+
+        let lines: Vec<_> = shell
+            .history()
+            .expect("history")
+            .iter()
+            .map(|item| item.command_line.as_str())
+            .collect();
+        assert!(lines.contains(&"foreign-before-append"), "{lines:?}");
+        assert!(lines.contains(&"mine"), "{lines:?}");
+
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)?
+            .write_all(b"foreign-after-append\n")?;
+        shell.read_new_history()?;
+        assert!(
+            shell
+                .history()
+                .expect("history")
+                .iter()
+                .any(|item| item.command_line == "foreign-after-append")
+        );
 
         Ok(())
     }

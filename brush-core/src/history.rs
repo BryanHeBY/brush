@@ -270,6 +270,41 @@ impl History {
         self.first_dirty
     }
 
+    /// Appends unsaved items to `path` without taking the history-file lock. The caller must
+    /// hold it, so the append and any accompanying reads form one transaction.
+    pub(crate) fn append_unsaved(
+        &mut self,
+        history_file_path: impl AsRef<Path>,
+        write_timestamps: bool,
+    ) -> Result<(), error::Error> {
+        let Some(start) = self.ensure_dirty_index() else {
+            return Ok(());
+        };
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(history_file_path.as_ref())?;
+        let mut written = Vec::new();
+        for (index, item) in self.items.iter().enumerate().skip(start) {
+            if !item.dirty {
+                continue;
+            }
+            if write_timestamps && let Some(timestamp) = item.timestamp {
+                writeln!(file, "#{}", timestamp.as_unix_seconds())?;
+            }
+            writeln!(file, "{}", item.command_line)?;
+            written.push(index);
+        }
+        file.flush()?;
+        for index in written {
+            if let Some(item) = self.items.get_mut(index) {
+                item.dirty = false;
+            }
+        }
+        self.first_dirty = None;
+        Ok(())
+    }
+
     /// Flushes the history to backing storage (if relevant).
     ///
     /// # Arguments
@@ -373,31 +408,7 @@ impl History {
         // history file is preserved byte-for-byte instead of being replaced by an empty
         // rewrite. It also keeps symlinks and permissions intact.
         if append && unsaved_items_only && max_items.is_none() {
-            let Some(start) = first_dirty else {
-                return Ok(());
-            };
-            let mut file = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(path)?;
-            let mut written = Vec::new();
-            for (index, item) in self.items.iter().enumerate().skip(start) {
-                if !item.dirty {
-                    continue;
-                }
-                if write_timestamps && let Some(timestamp) = item.timestamp {
-                    writeln!(file, "#{}", timestamp.as_unix_seconds())?;
-                }
-                writeln!(file, "{}", item.command_line)?;
-                written.push(index);
-            }
-            file.flush()?;
-            for index in written {
-                if let Some(item) = self.items.get_mut(index) {
-                    item.dirty = false;
-                }
-            }
-            self.first_dirty = None;
+            self.append_unsaved(path, write_timestamps)?;
             return Ok(());
         }
 
@@ -973,7 +984,9 @@ fn trim_history_entries(contents: &str, max_items: usize) -> String {
 ///
 /// The lock lives in the temporary directory rather than next to the history file so it does
 /// not become another file in the user's home (or in tests that compare history directories).
-fn lock_history_file(path: &Path) -> Result<crate::sys::fs::HistoryFileLock, error::Error> {
+pub(crate) fn lock_history_file(
+    path: &Path,
+) -> Result<crate::sys::fs::HistoryFileLock, error::Error> {
     use std::hash::{Hash as _, Hasher as _};
 
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
