@@ -3,39 +3,61 @@
 These notes cover source-compatibility changes in brush's published crates. They are
 additive unless marked otherwise.
 
-## `UIOptions` and `UiConfig` gained history settings
+## `UIOptions` gained history settings
 
-`brush-interactive::UIOptions` gained `history_append_immediately` and `history_share`;
-`brush_shell::config::UiConfig` gained the matching configuration fields at the same time.
-The builder and `Default` implementations continue to work.
+`brush-interactive::UIOptions` gained three fields:
 
-Downstream code that initializes either struct with an **exhaustive struct literal** must add
-the new fields (or switch to a struct-update expression). A complete literal that used to
-compile now fails with missing-field errors; this is a source-compatibility break for that
-initialization style only.
+- `history_suggestion_navigation` (default `false`)
+- `history_append_immediately` (default `false`)
+- `history_share` (default `false`)
+
+The builder and `Default` implementations continue to work. Downstream code that initializes
+`UIOptions` with an **exhaustive struct literal** must add the new fields (or switch to a
+struct-update expression). A complete literal that used to compile now fails with
+missing-field errors; this is a source-compatibility break for that initialization style only.
 
 Preferred initialization:
 
 ```rust
 // Builder
 let options = brush_interactive::UIOptions::builder()
+    .history_suggestion_navigation(true)
     .history_append_immediately(true)
     .history_share(true)
     .build();
 
 // Default plus overrides
 let options = brush_interactive::UIOptions {
+    history_suggestion_navigation: true,
     history_append_immediately: true,
     history_share: true,
     ..Default::default()
 };
+```
 
-let config = brush_shell::config::UiConfig {
+## `UiConfig` and `HistoryConfig` in `brush-shell`
+
+`brush_shell::config::UiConfig` gained `history_suggestion_navigation` (an
+`Option<bool>`; absent means `false`). The append/share settings are **not** in `UiConfig`:
+they are the `append_immediately` and `share` fields of
+`brush_shell::config::Config::history` (`HistoryConfig`).
+
+Exhaustive `UiConfig` or `HistoryConfig` literals likewise need the new fields or a
+struct-update expression:
+
+```rust
+let ui = brush_shell::config::UiConfig {
     history_suggestion_navigation: Some(true),
+    ..Default::default()
+};
+
+let history = brush_shell::config::HistoryConfig {
+    append_immediately: Some(true),
+    share: Some(true),
     ..Default::default()
 };
 ```
 
-`UIOptions` defaults both new fields to `false`. `UiConfig` fields are optional and absent
-means `false`; see the [configuration reference](configuration.md) and the generated
-`schemas/config.schema.json`.
+Configuration files set these under `[ui] history-suggestion-navigation` and
+`[history] append-immediately` / `share`; see the [configuration
+reference](configuration.md) and the generated `schemas/config.schema.json`.
