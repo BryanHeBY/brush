@@ -12,6 +12,7 @@ use std::sync::{
 static HANGUP: LazyLock<Arc<AtomicBool>> = LazyLock::new(|| Arc::new(AtomicBool::new(false)));
 /// Reedline consumes (swaps back to false) the flag it is given; keep a separate record so the
 /// interactive loop still knows the session was hung up.
+#[cfg(any(unix, feature = "reedline"))]
 static BREAK: LazyLock<Arc<AtomicBool>> = LazyLock::new(|| Arc::new(AtomicBool::new(false)));
 
 /// Returns a handle that a line editor can poll for a hangup.
@@ -23,6 +24,7 @@ pub(crate) fn signal() -> Arc<AtomicBool> {
 /// Clears a previously recorded hangup. Called when an interactive session starts.
 pub(crate) fn reset() {
     HANGUP.store(false, Ordering::SeqCst);
+    #[cfg(any(unix, feature = "reedline"))]
     BREAK.store(false, Ordering::SeqCst);
 }
 
@@ -32,6 +34,7 @@ pub(crate) fn requested() -> bool {
 }
 
 /// Records that a hangup was requested.
+#[cfg(any(unix, feature = "reedline"))]
 pub(crate) fn request() {
     HANGUP.store(true, Ordering::SeqCst);
     BREAK.store(true, Ordering::SeqCst);
