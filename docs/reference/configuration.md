@@ -96,8 +96,9 @@ step behind only while a command is still running.
 
 `share = true` is the zsh `SHARE_HISTORY` style: before each prompt brush imports entries
 other sessions appended to the file, and after each command it appends this session's new
-entries. It implies immediate appending. Entries already in the session are skipped by command
-line, and a very large history file makes each prompt more expensive to check.
+entries. It implies immediate appending. Only entries added since the last read are imported,
+so repeated identical commands are preserved; normal prompts read only the newly appended
+tail of the history file.
 
 The history file is `$HISTFILE`, which defaults to `~/.brush_history`. Setting `HISTFILE` to
 an empty string keeps history in memory but disables reading and writing the file.
