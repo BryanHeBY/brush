@@ -368,12 +368,45 @@ impl History {
         let first_dirty = unsaved_items_only
             .then(|| self.ensure_dirty_index())
             .flatten();
-        if append && unsaved_items_only && first_dirty.is_none() && max_items.is_none() {
+
+        // Appending is the common exit path. Write in place so an unreadable or non-UTF-8
+        // history file is preserved byte-for-byte instead of being replaced by an empty
+        // rewrite. It also keeps symlinks and permissions intact.
+        if append && unsaved_items_only && max_items.is_none() {
+            let Some(start) = first_dirty else {
+                return Ok(());
+            };
+            let mut file = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)?;
+            let mut written = Vec::new();
+            for (index, item) in self.items.iter().enumerate().skip(start) {
+                if !item.dirty {
+                    continue;
+                }
+                if write_timestamps && let Some(timestamp) = item.timestamp {
+                    writeln!(file, "#{}", timestamp.as_unix_seconds())?;
+                }
+                writeln!(file, "{}", item.command_line)?;
+                written.push(index);
+            }
+            file.flush()?;
+            for index in written {
+                if let Some(item) = self.items.get_mut(index) {
+                    item.dirty = false;
+                }
+            }
+            self.first_dirty = None;
             return Ok(());
         }
 
         let existing = if append {
-            std::fs::read_to_string(path).unwrap_or_default()
+            match std::fs::read_to_string(path) {
+                Ok(existing) => existing,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+                Err(error) => return Err(error.into()),
+            }
         } else {
             String::new()
         };
@@ -1287,6 +1320,35 @@ mod tests {
                 "lost command-{index}: {contents:?}"
             );
         }
+        Ok(())
+    }
+
+    #[test]
+    fn append_preserves_an_unreadable_existing_file() -> Result<(), error::Error> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("history");
+        let original = b"kept\n\xff\xfe\n";
+        std::fs::write(&path, original)?;
+
+        let mut history = History::default();
+        history.add(Item::new("appended"))?;
+        history.save_with_limit(&path, true, true, false, None)?;
+
+        let contents = std::fs::read(&path)?;
+        assert!(contents.starts_with(original), "{contents:?}");
+        assert!(contents.ends_with(b"appended\n"), "{contents:?}");
+
+        // A size-limited save must not treat the read failure as an empty file.
+        let original = std::fs::read(&path)?;
+        let mut history = History::default();
+        history.add(Item::new("must-not-write"))?;
+        assert!(
+            history
+                .save_with_limit(&path, true, true, false, Some(1))
+                .is_err()
+        );
+        assert_eq!(std::fs::read(&path)?, original);
+        assert!(history.first_dirty.is_some());
         Ok(())
     }
 
