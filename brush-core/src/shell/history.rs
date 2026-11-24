@@ -8,6 +8,50 @@ use std::{
 
 use crate::{error, history::HistoryControl, openfiles, patterns};
 
+/// Joins the lines of a multi-line command the way bash's `cmdhist` does: lines that end a
+/// simple command are separated by `"; "`, while a line ending at a keyword or a continuation
+/// (`do`, `then`, `|`, ...) gets a space instead. Leading whitespace on the next line is kept.
+fn join_multiline_command(command: &str) -> String {
+    let mut joined = String::new();
+
+    for (index, line) in command.lines().enumerate() {
+        if index > 0 {
+            let previous = joined.trim_end();
+            let last_word = previous.split_whitespace().last().unwrap_or_default();
+            let keyword = matches!(
+                last_word,
+                "do" | "then"
+                    | "else"
+                    | "elif"
+                    | "if"
+                    | "while"
+                    | "until"
+                    | "for"
+                    | "case"
+                    | "in"
+                    | "{"
+                    | "("
+                    | "!"
+                    | "|"
+                    | "||"
+                    | "&&"
+                    | "&"
+                    | ";"
+            );
+            let continuation = previous.ends_with('\\');
+
+            if keyword || continuation || previous.ends_with(';') {
+                joined.push(' ');
+            } else {
+                joined.push_str("; ");
+            }
+        }
+        joined.push_str(line);
+    }
+
+    joined
+}
+
 impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
     pub(super) fn load_history(&self) -> Result<Option<crate::history::History>, error::Error> {
         const MAX_FILE_SIZE_FOR_HISTORY_IMPORT: u64 = 1024 * 1024 * 1024; // 1 GiB
@@ -239,6 +283,17 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
         if command.trim().is_empty() {
             return Ok(());
         }
+
+        // `cmdhist` joins the lines of a multi-line command into one entry; `lithist` keeps
+        // them. The caller has already trimmed the final newline.
+        let command = if self.options.save_multiline_cmds_in_history
+            && !self.options.embed_newlines_in_multiline_cmds_in_history
+        {
+            std::borrow::Cow::Owned(join_multiline_command(command))
+        } else {
+            std::borrow::Cow::Borrowed(command)
+        };
+        let command = command.as_ref();
 
         if self.history_ignored(command)? {
             return Ok(());

@@ -831,6 +831,38 @@ fn share_imports_other_sessions_commands() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// An empty `HISTFILE` keeps the in-memory list but reads and writes no file.
+#[test]
+fn empty_histfile_keeps_memory_history() -> anyhow::Result<()> {
+    let home = tempfile::tempdir()?;
+    let mut session = start_history_session(Some("basic"), None, home.path())?;
+    session.expect_prompt()?;
+
+    session.send_line("HISTFILE=")?;
+    session.expect_prompt()?;
+    session.send_line("echo kept-in-memory")?;
+    session.expect("kept-in-memory")?;
+    session.expect_prompt()?;
+
+    let seen = home.path().join("seen");
+    session.send_line(format!(
+        "history > {}; echo HISTORY-DONE",
+        brush_core::escape::single_quote(seen.to_str().context("seen path")?)
+    ))?;
+    session.expect("HISTORY-DONE")?;
+    session.expect_prompt()?;
+
+    let history = std::fs::read_to_string(&seen)?;
+    assert!(history.contains("kept-in-memory"), "history: {history}");
+    assert!(
+        !home.path().join("history").exists(),
+        "HISTFILE='' must not write the history file"
+    );
+
+    session.exit()?;
+    Ok(())
+}
+
 type ShellSession = ReplSession<Session<UnixProcess, LogStream<PtyStream, std::io::Stdout>>>;
 type RawShellSession = ReplSession<Session<UnixProcess, PtyStream>>;
 // N.B. Comment out the above line and uncomment out the following line to disable logging of the

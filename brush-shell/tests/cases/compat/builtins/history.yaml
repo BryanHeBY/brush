@@ -722,7 +722,6 @@ cases:
       : new
 
   - name: "cmdhist saves a multi-line command as one line"
-    known_failure: true # brush saves the command's newlines as typed
     ignore_stderr: true # Ignore job control warnings from interactive shell without a tty
     args: ["-i"]
     env:
@@ -732,6 +731,40 @@ cases:
         : inside
       done
       history
+
+  - name: "hash-prefixed commands are commands, not timestamps"
+    args: ["-o", "history"]
+    env:
+      HISTFILE: "history-file.txt"
+    stdin: |
+      # a comment
+      #123
+      echo after
+      history
+      unset HISTFILE
+
+  - name: "timestamps keep hash-prefixed commands"
+    args: ["-o", "history"]
+    env:
+      HISTFILE: "history-file.txt"
+      HISTTIMEFORMAT: "%s "
+    stdin: |
+      # a comment
+      echo after
+      history
+      unset HISTFILE
+
+  - name: "lithist keeps a multi-line command's newlines"
+    args: ["-o", "history"]
+    env:
+      HISTFILE: "history-file.txt"
+    stdin: |
+      shopt -s lithist
+      for x in 1; do
+        : inside
+      done
+      history
+      unset HISTFILE
 
   - name: "History expansion"
     known_failure: true # brush doesn't implement history expansion

@@ -65,14 +65,13 @@ impl History {
                 }
             };
 
-            // Look for timestamp comments; ignore other comment lines.
-            if let Some(comment) = line.strip_prefix("#") {
-                if let Ok(seconds_since_epoch) = comment.trim().parse() {
-                    next_timestamp = ItemTimestamp::from_unix_seconds(seconds_since_epoch);
-                } else {
-                    next_timestamp = None;
-                }
-
+            // A `#<digits>` line is a timestamp for the entry that follows. Other lines that
+            // start with `#` are commands (as in bash, a command that itself looks like a
+            // timestamp is ambiguous and is treated as one).
+            if let Some(comment) = line.strip_prefix("#")
+                && let Ok(seconds_since_epoch) = comment.trim().parse()
+            {
+                next_timestamp = ItemTimestamp::from_unix_seconds(seconds_since_epoch);
                 continue;
             }
 
@@ -323,11 +322,40 @@ impl History {
             return Ok(());
         };
         let lines: Vec<&str> = contents.lines().collect();
-        if lines.len() <= max_items {
+
+        // With timestamps, a `#<digits>` line starts an entry and the lines after it belong to
+        // that entry (a multi-line command); without them, each line is an entry, as bash reads
+        // an untimed file. Keep the newest entries, not merely the newest lines.
+        let timed = lines.iter().any(|line| {
+            line.strip_prefix('#')
+                .is_some_and(|rest| rest.trim().parse::<i64>().is_ok())
+        });
+        let mut entries: Vec<Vec<&str>> = Vec::new();
+        if timed {
+            for line in lines {
+                let is_timestamp = line
+                    .strip_prefix('#')
+                    .is_some_and(|rest| rest.trim().parse::<i64>().is_ok());
+                if is_timestamp || entries.is_empty() {
+                    entries.push(vec![line]);
+                } else if let Some(entry) = entries.last_mut() {
+                    entry.push(line);
+                }
+            }
+        } else {
+            entries.extend(lines.into_iter().map(|line| vec![line]));
+        }
+
+        if entries.len() <= max_items {
             return Ok(());
         }
 
-        let mut trimmed = lines[lines.len() - max_items..].join("\n");
+        let mut trimmed = entries[entries.len() - max_items..]
+            .iter()
+            .flatten()
+            .copied()
+            .collect::<Vec<_>>()
+            .join("\n");
         if !trimmed.is_empty() {
             trimmed.push('\n');
         }
@@ -972,6 +1000,23 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn truncate_file_keeps_the_newest_entries() -> Result<(), error::Error> {
+        let dir = tempfile::tempdir()?;
+
+        let untimed = dir.path().join("untimed");
+        std::fs::write(&untimed, "a\nb\nc\n")?;
+        History::default().truncate_file(&untimed, 2)?;
+        assert_eq!(std::fs::read_to_string(&untimed)?, "b\nc\n");
+
+        let timed = dir.path().join("timed");
+        std::fs::write(&timed, "#1\na\nb\n#2\nc\n")?;
+        History::default().truncate_file(&timed, 1)?;
+        assert_eq!(std::fs::read_to_string(&timed)?, "#2\nc\n");
+
+        Ok(())
+    }
+
     /// Each of a query's filters, on its own. ID and time bounds are exclusive, and an item
     /// with no timestamp isn't excluded by time bounds.
     #[test]
@@ -1083,24 +1128,31 @@ mod tests {
         let file = b"#1700000000\na\n#1700000005\n#not a time\nb\n#1700000001\n#1700000002\nc\n\xff\xfe\nd\n";
         let mut history = History::import(&file[..])?;
 
-        assert_eq!(command_lines(history.iter()), ["a", "b", "c", "d"]);
+        assert_eq!(
+            command_lines(history.iter()),
+            ["a", "#not a time", "b", "c", "d"]
+        );
         let timestamps: Vec<_> = history.iter().map(|item| item.timestamp).collect();
         assert_eq!(
             timestamps[0],
             ItemTimestamp::from_unix_seconds(1_700_000_000)
         );
-        assert!(timestamps[1].is_some_and(|ts| ts >= before));
         assert_eq!(
-            timestamps[2],
+            timestamps[1],
+            ItemTimestamp::from_unix_seconds(1_700_000_005)
+        );
+        assert!(timestamps[2].is_some_and(|ts| ts >= before));
+        assert_eq!(
+            timestamps[3],
             ItemTimestamp::from_unix_seconds(1_700_000_002)
         );
-        assert!(timestamps[3].is_some_and(|ts| ts >= before));
+        assert!(timestamps[4].is_some_and(|ts| ts >= before));
         assert!(history.iter().all(|item| !item.dirty));
         assert_eq!(
             history.iter().map(|item| item.id).collect::<Vec<_>>(),
-            [0, 1, 2, 3]
+            [0, 1, 2, 3, 4]
         );
-        assert_eq!(history.add(Item::new("e"))?, 4);
+        assert_eq!(history.add(Item::new("e"))?, 5);
 
         assert!(History::import(&b""[..])?.is_empty());
 
