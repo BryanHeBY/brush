@@ -701,9 +701,9 @@ impl Spec {
             let mut dir_candidates =
                 get_file_completions(shell, context.word, /* must_be_dir */ true).await;
 
-            // If directories are all we have, let them be marked as such.
-            if candidates.is_empty() && shell.completion_config().fallback_options.mark_directories
-            {
+            // Directory candidates still need filename quoting/escaping even when
+            // `mark-directories` is off; that setting only controls the trailing slash.
+            if candidates.is_empty() {
                 processing_options.treat_as_filenames = true;
             }
 
@@ -734,9 +734,9 @@ impl Spec {
                 get_file_completions(shell, context.word, must_be_dir).await;
             candidates.append(&mut default_candidates);
 
-            if shell.completion_config().fallback_options.mark_directories {
-                processing_options.treat_as_filenames = true;
-            }
+            // `mark-directories` only controls the trailing slash; file-name escaping and
+            // path presentation must stay enabled when it is off.
+            processing_options.treat_as_filenames = true;
         }
 
         (candidates, processing_options)
