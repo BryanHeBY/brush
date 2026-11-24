@@ -372,8 +372,13 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
         let complete_end = complete_record_end(&bytes);
         let checksum_at = |offset: usize| tail_checksum(&bytes[..offset]);
 
+        let stored = if new_only {
+            self.history_read_position.clone()
+        } else {
+            None
+        };
         let offset = if new_only {
-            match &self.history_read_position {
+            match &stored {
                 Some((position_path, position, _stored_id, stored_checksum))
                     if position_path == &path
                         && (*position as usize) <= complete_end
@@ -393,11 +398,50 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
             return Ok(());
         }
 
+        let cursor_reset = new_only
+            && stored
+                .as_ref()
+                .is_some_and(|(stored_path, position, _, _)| {
+                    stored_path == &path && *position > 0 && offset == 0
+                });
         let size_limit = self.history_size_limit();
         let Some(history) = &mut self.history else {
             return Err(error::ErrorKind::HistoryNotEnabled.into());
         };
-        history.append_from(&bytes[offset..complete_end])?;
+        if cursor_reset {
+            // A rewrite (normal exit, HISTFILESIZE trim, or rotation) can replace the inode,
+            // so the old byte offset no longer applies. Skip leading records already at the
+            // tail of memory before importing the rest.
+            let imported = crate::history::History::import(&bytes[..complete_end])?;
+            let imported_lines: Vec<_> = imported
+                .iter()
+                .map(|item| item.command_line.as_str())
+                .collect();
+            let all_existing: Vec<_> = history
+                .iter()
+                .map(|item| item.command_line.as_str())
+                .collect();
+            let existing_lines: Vec<_> = all_existing
+                .iter()
+                .rev()
+                .take(imported_lines.len())
+                .copied()
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect();
+            let mut skip = 0;
+            for count in 1..=existing_lines.len().min(imported_lines.len()) {
+                if existing_lines[existing_lines.len() - count..] == imported_lines[..count] {
+                    skip = count;
+                }
+            }
+            for item in imported.iter().skip(skip).cloned() {
+                history.add(item)?;
+            }
+        } else {
+            history.append_from(&bytes[offset..complete_end])?;
+        }
         if let Some(limit) = size_limit {
             history.retain_last(limit);
         }
@@ -655,6 +699,51 @@ mod tests {
         assert_eq!(complete_record_end(b"#1700000000\ncmd\n#1700000001\n"), 16);
         assert_eq!(complete_record_end(b"cmd\n"), 4);
         assert_eq!(complete_record_end(b"#1700000000\nonly-one\n#1\n"), 21);
+    }
+
+    #[tokio::test]
+    async fn share_does_not_duplicate_records_dropped_by_a_trim() -> Result<(), error::Error> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("history");
+        std::fs::write(&path, "one\ntwo\nthree\n")?;
+
+        let loaded = History::import(std::fs::File::open(&path)?)?;
+        let mut shell = crate::Shell::builder().build().await?;
+        shell.set_env_global(
+            "HISTFILE",
+            ShellVariable::new(path.to_string_lossy().to_string()),
+        )?;
+        shell.history = Some(loaded);
+        shell.remember_history_file_position();
+
+        let replacement = dir.path().join("replacement");
+        std::fs::write(&replacement, "two\nthree\nnew\n")?;
+        std::fs::rename(&replacement, &path)?;
+
+        shell.read_new_history()?;
+
+        let lines: Vec<_> = shell
+            .history()
+            .expect("history")
+            .iter()
+            .map(|item| item.command_line.as_str())
+            .collect();
+        assert_eq!(
+            lines.iter().filter(|line| **line == "two").count(),
+            1,
+            "{lines:?}"
+        );
+        assert_eq!(
+            lines.iter().filter(|line| **line == "three").count(),
+            1,
+            "{lines:?}"
+        );
+        assert_eq!(
+            lines.iter().filter(|line| **line == "new").count(),
+            1,
+            "{lines:?}"
+        );
+        Ok(())
     }
 
     #[tokio::test]
