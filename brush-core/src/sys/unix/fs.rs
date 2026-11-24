@@ -8,9 +8,31 @@ use crate::error;
 
 pub use std::os::unix::fs::MetadataExt;
 
-#[cfg(target_os = "android")]
-// _PATH_DEFPATH in https://android.googlesource.com/platform/bionic/+/refs/heads/main/libc/include/paths.h
-const ANDROID_DEFPATH: &str = "/product/bin:/apex/com.android.runtime/bin:/apex/com.android.art/bin:/apex/com.android.virt/bin:/system_ext/bin:/system/bin:/system/xbin:/odm/bin:/vendor/bin:/vendor/xbin";
+/// An exclusive advisory lock on a history file. Dropping it releases the lock.
+pub struct HistoryFileLock(std::fs::File);
+
+impl Drop for HistoryFileLock {
+    fn drop(&mut self) {
+        use std::os::fd::AsRawFd as _;
+
+        // Closing the descriptor also releases the lock; ignore errors on the way out.
+        // SAFETY: `flock` only reads the valid descriptor.
+        unsafe {
+            let _ = nix::libc::flock(self.0.as_raw_fd(), nix::libc::LOCK_UN);
+        }
+    }
+}
+
+/// Takes an exclusive advisory lock on `file`, blocking until it is available.
+pub fn lock_history_file(file: std::fs::File) -> std::io::Result<HistoryFileLock> {
+    use std::os::fd::AsRawFd as _;
+
+    // SAFETY: `flock` only reads the valid descriptor.
+    if unsafe { nix::libc::flock(file.as_raw_fd(), nix::libc::LOCK_EX) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(HistoryFileLock(file))
+}
 
 impl crate::sys::fs::PathExt for Path {
     fn readable(&self) -> bool {

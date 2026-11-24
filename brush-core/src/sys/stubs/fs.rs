@@ -144,3 +144,12 @@ pub(crate) fn resolve_executable_path(
 ) -> std::path::PathBuf {
     path
 }
+
+/// An exclusive lock on a history file; this platform has no portable advisory lock, so it
+/// only keeps the descriptor open.
+pub struct HistoryFileLock(std::fs::File);
+
+/// Takes an exclusive advisory lock on `file` if the platform supports one.
+pub fn lock_history_file(file: std::fs::File) -> std::io::Result<HistoryFileLock> {
+    Ok(HistoryFileLock(file))
+}

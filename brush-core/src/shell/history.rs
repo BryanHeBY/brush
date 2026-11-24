@@ -269,16 +269,13 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
             let file_limit = self.history_file_size_limit();
 
             if let Some(history) = &mut self.history {
-                history.flush(
+                history.save_with_limit(
                     history_file_path.as_path(),
                     append,
                     append, /* unsaved items only when appending */
                     write_timestamps,
+                    file_limit,
                 )?;
-
-                if let Some(limit) = file_limit {
-                    history.truncate_file(history_file_path.as_path(), limit)?;
-                }
             }
 
             // Remember where this session's writes end, so share mode doesn't import them

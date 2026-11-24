@@ -251,6 +251,8 @@ impl History {
         unsaved_items_only: bool,
         write_timestamps: bool,
     ) -> Result<(), error::Error> {
+        let _lock = lock_history_file(history_file_path.as_ref())?;
+
         // Open the file
         let mut file_options = std::fs::File::options();
 
@@ -307,6 +309,72 @@ impl History {
         Ok(())
     }
 
+    /// Saves history, applying `HISTFILESIZE`, under the history file's cross-process lock.
+    ///
+    /// The file is rebuilt in a temporary file and atomically renamed, so a concurrent
+    /// appender cannot slip between reading the old entries and replacing them, and a failed
+    /// write leaves the previous file intact. Items are marked saved only after the rename.
+    pub fn save_with_limit(
+        &mut self,
+        history_file_path: impl AsRef<Path>,
+        append: bool,
+        unsaved_items_only: bool,
+        write_timestamps: bool,
+        max_items: Option<usize>,
+    ) -> Result<(), error::Error> {
+        use std::fmt::Write as _;
+
+        let path = history_file_path.as_ref();
+        let _lock = lock_history_file(path)?;
+
+        if append && unsaved_items_only && self.first_dirty.is_none() && max_items.is_none() {
+            return Ok(());
+        }
+
+        let existing = if append {
+            std::fs::read_to_string(path).unwrap_or_default()
+        } else {
+            String::new()
+        };
+        let start = if unsaved_items_only {
+            self.first_dirty.unwrap_or(0)
+        } else {
+            0
+        };
+
+        let mut content = existing;
+        let mut written = Vec::new();
+        for (index, item) in self.items.iter().enumerate().skip(start) {
+            if unsaved_items_only && !item.dirty {
+                continue;
+            }
+            if write_timestamps && let Some(timestamp) = item.timestamp {
+                writeln!(content, "#{}", timestamp.as_unix_seconds())?;
+            }
+            writeln!(content, "{}", item.command_line)?;
+            if unsaved_items_only {
+                written.push(index);
+            }
+        }
+
+        if let Some(max_items) = max_items {
+            content = trim_history_entries(&content, max_items);
+        }
+
+        atomic_write(path, content.as_bytes())?;
+
+        for index in written {
+            if let Some(item) = self.items.get_mut(index) {
+                item.dirty = false;
+            }
+        }
+        if unsaved_items_only {
+            self.first_dirty = None;
+        }
+
+        Ok(())
+    }
+
     /// Trims the backing file to its last `max_items` lines.
     ///
     /// `HISTFILESIZE` counts entries, but a history file can also contain timestamp lines; a
@@ -318,6 +386,7 @@ impl History {
         max_items: usize,
     ) -> Result<(), error::Error> {
         let path = history_file_path.as_ref();
+        let _lock = lock_history_file(path)?;
         let Ok(contents) = std::fs::read_to_string(path) else {
             return Ok(());
         };
@@ -761,6 +830,89 @@ impl<'a> Iterator for Search<'a> {
     }
 }
 
+/// Keeps the last `max_items` entries in a history file's contents.
+///
+/// With timestamps, a `#<digits>` line starts an entry and the lines after it belong to that
+/// entry (a multi-line command); without them, each line is an entry, as bash reads an untimed
+/// file.
+fn trim_history_entries(contents: &str, max_items: usize) -> String {
+    let lines: Vec<&str> = contents.lines().collect();
+    let timed = lines.iter().any(|line| {
+        line.strip_prefix('#')
+            .is_some_and(|rest| rest.trim().parse::<i64>().is_ok())
+    });
+    let mut entries: Vec<Vec<&str>> = Vec::new();
+    if timed {
+        for line in lines {
+            let is_timestamp = line
+                .strip_prefix('#')
+                .is_some_and(|rest| rest.trim().parse::<i64>().is_ok());
+            if is_timestamp || entries.is_empty() {
+                entries.push(vec![line]);
+            } else if let Some(entry) = entries.last_mut() {
+                entry.push(line);
+            }
+        }
+    } else {
+        entries.extend(lines.into_iter().map(|line| vec![line]));
+    }
+
+    if entries.len() <= max_items {
+        return contents.to_owned();
+    }
+    if max_items == 0 {
+        return String::new();
+    }
+
+    let mut trimmed = entries[entries.len() - max_items..]
+        .iter()
+        .flatten()
+        .copied()
+        .collect::<Vec<_>>()
+        .join("\n");
+    trimmed.push('\n');
+    trimmed
+}
+
+/// Locks a per-history-file lock used to serialize writers to `path`.
+///
+/// The lock lives in the temporary directory rather than next to the history file so it does
+/// not become another file in the user's home (or in tests that compare history directories).
+fn lock_history_file(path: &Path) -> Result<crate::sys::fs::HistoryFileLock, error::Error> {
+    use std::hash::{Hash as _, Hasher as _};
+
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    path.hash(&mut hasher);
+    let lock_path =
+        std::env::temp_dir().join(format!("brush-history-{:016x}.lock", hasher.finish()));
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .open(lock_path)?;
+    Ok(crate::sys::fs::lock_history_file(file)?)
+}
+
+/// Writes `contents` to a temporary file next to `path`, then renames it over `path`.
+fn atomic_write(path: &Path, contents: &[u8]) -> Result<(), error::Error> {
+    let file_name = path.file_name().ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "invalid history file")
+    })?;
+    let mut temp_name = std::ffi::OsString::from(".");
+    temp_name.push(file_name);
+    temp_name.push(format!(".tmp.{}", std::process::id()));
+    let temp_path = path.with_file_name(temp_name);
+
+    let result = (|| -> Result<(), error::Error> {
+        std::fs::write(&temp_path, contents)?;
+        std::fs::rename(&temp_path, path)?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temp_path);
+    }
+    result
+}
+
 #[cfg(test)]
 #[allow(clippy::panic_in_result_fn, reason = "assertions in a fallible test")]
 mod tests {
@@ -997,6 +1149,87 @@ mod tests {
         history.flush(&path, false, false, false)?;
         assert_eq!(read()?, "old\nnew1\nnew2\n");
 
+        Ok(())
+    }
+
+    #[test]
+    fn save_with_limit_keeps_every_concurrent_append() -> Result<(), error::Error> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("history");
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(7));
+
+        let mut threads = Vec::new();
+        for index in 0..6 {
+            let path = path.clone();
+            let barrier = barrier.clone();
+            threads.push(std::thread::spawn(move || {
+                let mut history = History::default();
+                history.add(Item::new(format!("command-{index}")))?;
+                barrier.wait();
+                history.save_with_limit(&path, true, true, false, None)
+            }));
+        }
+
+        barrier.wait();
+        for thread in threads {
+            thread.join().expect("writer thread panicked")?;
+        }
+
+        let contents = std::fs::read_to_string(&path)?;
+        for index in 0..6 {
+            assert!(
+                contents.contains(&format!("command-{index}")),
+                "lost command-{index}: {contents:?}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn save_with_limit_keeps_the_newest_entries() -> Result<(), error::Error> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("history");
+        std::fs::write(&path, "#1\nold-1\n#2\nold-2\n#3\nother-session\n")?;
+
+        let mut history = History::default();
+        history.add(Item::new("mine"))?;
+        history.save_with_limit(&path, true, true, true, Some(2))?;
+
+        let contents = std::fs::read_to_string(&path)?;
+        assert!(contents.contains("other-session"), "{contents:?}");
+        assert!(contents.contains("mine"), "{contents:?}");
+        assert!(!contents.contains("old-1"), "{contents:?}");
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn save_with_limit_failure_keeps_the_file_and_allows_retry() -> Result<(), error::Error> {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("history");
+        std::fs::write(&path, "existing\n")?;
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o555))?;
+
+        let mut history = History::default();
+        history.add(Item::new("retry-me"))?;
+        assert!(
+            history
+                .save_with_limit(&path, true, true, false, None)
+                .is_err()
+        );
+        assert_eq!(std::fs::read_to_string(&path)?, "existing\n");
+        assert!(history.first_dirty.is_some());
+
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755))?;
+        history.save_with_limit(&path, true, true, false, None)?;
+        let contents = std::fs::read_to_string(&path)?;
+        assert!(contents.contains("retry-me"), "{contents:?}");
+        assert_eq!(
+            std::fs::read_to_string(&path)?.matches("retry-me").count(),
+            1
+        );
         Ok(())
     }
 
