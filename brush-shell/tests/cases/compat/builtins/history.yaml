@@ -1000,6 +1000,39 @@ cases:
     stdin: |
       unset HISTFILE
 
+  - name: "history -r resolves a relative file from the current directory"
+    args: ["-o", "history"]
+    env:
+      HISTFILE: ""
+    test_files:
+      - path: "probe.hist"
+        contents: |
+          : parent-marker
+      - path: "sub/probe.hist"
+        contents: |
+          : inner-marker
+    stdin: |
+      cd sub
+      history -c; history -r probe.hist; history
+
+  - name: "history -a and -w resolve destinations from the current directory"
+    args: ["-o", "history"]
+    env:
+      HISTFILE: ""
+    test_files:
+      - path: "sub/placeholder"
+        contents: ""
+    stdin: |
+      cd sub
+      history -s : append-marker
+      history -a append.hist
+      history -w write.hist
+      [[ -s append.hist && -s write.hist ]] || exit 1
+      cd ..
+      [[ ! -e append.hist && ! -e write.hist ]] || exit 1
+      # This case checks destination resolution, not how each shell records history -s.
+      cd sub && rm -- append.hist write.hist
+
   - name: "History expansion"
     known_failure: true # brush doesn't implement history expansion
     ignore_stderr: true # Ignore job control warnings from interactive shell without a tty

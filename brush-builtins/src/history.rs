@@ -57,7 +57,7 @@ pub(crate) struct HistoryCommand {
 }
 
 struct HistoryConfig {
-    default_history_file_path: Option<PathBuf>,
+    file_path: Option<PathBuf>,
     time_format: Option<String>,
 }
 
@@ -72,7 +72,13 @@ impl<SE: brush_core::ShellExtensions> builtins::Builtin<SE> for HistoryCommand {
     ) -> Result<ExecutionResult, Self::Error> {
         // Retrieve the shell's history config while we still can.
         let config = HistoryConfig {
-            default_history_file_path: context.shell.history_file_path(),
+            file_path: if self.append_session_to_file || self.write_session_to_file {
+                self.file_operand()
+                    .map(|path| context.shell.absolute_path(path))
+                    .or_else(|| context.shell.history_file_path())
+            } else {
+                None
+            },
             time_format: context.shell.history_time_format(),
         };
 
@@ -80,7 +86,7 @@ impl<SE: brush_core::ShellExtensions> builtins::Builtin<SE> for HistoryCommand {
         let stderr = context.stderr();
 
         if self.append_rest_of_file_to_session || self.append_file_to_session {
-            let path = self.args.first().map(Path::new);
+            let path = self.file_operand();
             let new_only = self.append_rest_of_file_to_session;
             return context
                 .shell
@@ -97,6 +103,10 @@ impl<SE: brush_core::ShellExtensions> builtins::Builtin<SE> for HistoryCommand {
 }
 
 impl HistoryCommand {
+    fn file_operand(&self) -> Option<&Path> {
+        self.args.first().map(Path::new)
+    }
+
     #[expect(clippy::cast_possible_wrap)]
     #[expect(clippy::cast_possible_truncation)]
     #[expect(clippy::cast_sign_loss)]
@@ -140,7 +150,7 @@ impl HistoryCommand {
         }
 
         if self.append_session_to_file {
-            if let Some(file_path) = self.history_file_path(config) {
+            if let Some(file_path) = &config.file_path {
                 history.flush(
                     file_path,
                     true,                         /* append? */
@@ -153,7 +163,7 @@ impl HistoryCommand {
         }
 
         if self.write_session_to_file {
-            if let Some(file_path) = self.history_file_path(config) {
+            if let Some(file_path) = &config.file_path {
                 history.flush(
                     file_path,
                     false,                        /* append? */
@@ -184,14 +194,6 @@ impl HistoryCommand {
         display_history(history, config, max_entries, stdout, stderr)?;
 
         Ok(ExecutionResult::success())
-    }
-
-    /// The file named by the first argument, or else the shell's history file.
-    fn history_file_path<'a>(&'a self, config: &'a HistoryConfig) -> Option<&'a Path> {
-        self.args
-            .first()
-            .map(Path::new)
-            .or(config.default_history_file_path.as_deref())
     }
 }
 
@@ -245,17 +247,12 @@ mod tests {
 
     #[test]
     fn test_parse_dash_a() -> Result<()> {
-        let config = HistoryConfig {
-            default_history_file_path: Some(PathBuf::from("default")),
-            time_format: None,
-        };
-
         let cmd = parse(&["5"])?;
         assert!(!cmd.append_session_to_file);
 
         let cmd = parse(&["-a"])?;
         assert!(cmd.append_session_to_file);
-        assert_eq!(cmd.history_file_path(&config), Some(Path::new("default")));
+        assert_eq!(cmd.file_operand(), None);
 
         for words in [
             &["-a", "token"][..],
@@ -264,7 +261,7 @@ mod tests {
         ] {
             let cmd = parse(words)?;
             assert!(cmd.append_session_to_file);
-            assert_eq!(cmd.history_file_path(&config), Some(Path::new("token")));
+            assert_eq!(cmd.file_operand(), Some(Path::new("token")));
         }
 
         assert!(parse(&["-atoken"]).is_err());

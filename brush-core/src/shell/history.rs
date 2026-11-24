@@ -330,7 +330,7 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
     pub fn history_file_path(&self) -> Option<PathBuf> {
         self.env_str("HISTFILE")
             .filter(|s| !s.is_empty())
-            .map(|s| PathBuf::from(s.into_owned()))
+            .map(|s| self.absolute_path(s.as_ref()))
     }
 
     /// Returns the path to the history file used by the shell, if one is set.
@@ -358,7 +358,7 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
         new_only: bool,
     ) -> Result<(), error::Error> {
         let Some(path) = path
-            .map(Path::to_path_buf)
+            .map(|path| self.absolute_path(path))
             .or_else(|| self.history_file_path())
         else {
             return Ok(());
