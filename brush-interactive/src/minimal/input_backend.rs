@@ -22,7 +22,28 @@ impl InputBackend for MinimalInputBackend {
         let stdin = std::io::stdin();
         let prompt = stdin.is_terminal().then_some(&prompt);
 
-        Self::read_program_from(shell_ref, prompt, &mut stdin.lock(), &mut std::io::stderr())
+        Self::read_program_from_with_wait(
+            shell_ref,
+            prompt,
+            &mut stdin.lock(),
+            &mut std::io::stderr(),
+            || {
+                loop {
+                    if crate::hangup::requested() {
+                        return false;
+                    }
+                    match brush_core::sys::poll::poll_for_input(
+                        &brush_core::openfiles::OpenFile::from(std::io::stdin()),
+                        std::time::Duration::from_millis(100),
+                    ) {
+                        Ok(true) => return true,
+                        Ok(false) => {}
+                        // Let the read itself report the error.
+                        Err(_) => return true,
+                    }
+                }
+            },
+        )
     }
 }
 
@@ -37,11 +58,24 @@ impl MinimalInputBackend {
     /// * `prompt` - The prompt to display, or `None` to display nothing.
     /// * `reader` - The source to read lines from.
     /// * `writer` - Where prompts are written.
+    #[cfg(test)]
     fn read_program_from<R: BufRead, W: Write>(
         shell_ref: &crate::ShellRef<impl brush_core::ShellExtensions>,
         prompt: Option<&InteractivePrompt>,
         reader: &mut R,
         writer: &mut W,
+    ) -> Result<ReadResult, ShellError> {
+        Self::read_program_from_with_wait(shell_ref, prompt, reader, writer, || true)
+    }
+
+    /// Like [`Self::read_program_from`], but `wait_for_input` is consulted before each blocking
+    /// read. The minimal backend uses it to notice a hangup while waiting for a terminal.
+    fn read_program_from_with_wait<R: BufRead, W: Write>(
+        shell_ref: &crate::ShellRef<impl brush_core::ShellExtensions>,
+        prompt: Option<&InteractivePrompt>,
+        reader: &mut R,
+        writer: &mut W,
+        mut wait_for_input: impl FnMut() -> bool,
     ) -> Result<ReadResult, ShellError> {
         let mut result = String::new();
 
@@ -55,6 +89,11 @@ impl MinimalInputBackend {
 
                 write!(writer, "{to_display}")?;
                 writer.flush()?;
+            }
+
+            // Wait in small steps so a hangup is noticed even when no input arrives.
+            if !wait_for_input() {
+                break;
             }
 
             // Nothing more is coming; run what we have and let the parser complain if

@@ -42,6 +42,9 @@ The configuration file uses [TOML](https://toml.io/) format. All settings are op
 [ui]
 syntax-highlighting = true
 
+[history]
+append-immediately = true
+
 [experimental]
 zsh-hooks = true
 terminal-shell-integration = true
@@ -73,6 +76,26 @@ line uses the configured history bindings. Right accepts the displayed
 suggestion. In Emacs editing mode, Ctrl+Right accepts up to the start of the
 next word, including any separators crossed, or moves by word when there is
 no suggestion.
+
+### `[history]` Section
+
+Command history settings.
+
+| Setting               | Type    | Default | Description                                              |
+|-----------------------|---------|---------|----------------------------------------------------------|
+| `append-immediately`  | boolean | `false` | Append each command to the history file as it finishes   |
+
+By default, an interactive shell appends the commands it recorded when the session ends
+normally, as bash does. If the terminal is closed, brush saves the history before exiting;
+commands still running at that moment may not have been appended yet.
+
+With `append-immediately = true`, brush appends the command right after it finishes instead
+of waiting for the session to end. This is the zsh `INC_APPEND_HISTORY` style: the file is a
+step behind only while a command is still running.
+
+The history file is `$HISTFILE`, which defaults to `~/.brush_history`. Setting `HISTFILE` to
+an empty string keeps history in memory but disables reading and writing the file. Brush
+appends to the file by default, so several sessions can share it.
 
 ### `[experimental]` Section
 

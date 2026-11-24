@@ -219,6 +219,10 @@ impl InputBackend for ReedlineInputBackend {
         shell: &crate::ShellRef<impl brush_core::ShellExtensions>,
         prompt: InteractivePrompt,
     ) -> Result<ReadResult, ShellError> {
+        if crate::hangup::requested() {
+            return Ok(ReadResult::Eof);
+        }
+
         let (options, raw_input) = {
             let shell = shell.lock().await;
             let options = shell.readline_options().clone();

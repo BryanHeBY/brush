@@ -589,6 +589,7 @@ dependencies = [
  "brush-parser",
  "crossterm",
  "indexmap",
+ "libc",
  "nu-ansi-term",
  "pretty_assertions",
  "radix_trie",

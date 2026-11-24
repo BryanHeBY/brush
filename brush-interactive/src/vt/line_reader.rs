@@ -81,6 +81,10 @@ impl LineReader {
         };
 
         loop {
+            if crate::hangup::requested() {
+                return Ok(ReadResult::Eof);
+            }
+
             match self
                 .read_one_line(shell, &program, prompt_text, terminal, out)
                 .await?

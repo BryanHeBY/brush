@@ -15,7 +15,7 @@ use std::os::unix::process::CommandExt as _;
 
 use expectrl::{
     Expect, Session,
-    process::unix::{PtyStream, Signal, UnixProcess},
+    process::unix::{PtyStream, Signal, UnixProcess, WaitStatus},
     repl::ReplSession,
     stream::log::LogStream,
 };
@@ -599,6 +599,51 @@ fn read_history_file(home: &std::path::Path) -> String {
     std::fs::read_to_string(home.join("history")).unwrap_or_default()
 }
 
+/// Closing a terminal hangs the shell up. The commands this session already recorded must not
+/// disappear with it, whether the default (reedline) backend or the minimal one is reading.
+#[test]
+fn history_survives_hangup() -> anyhow::Result<()> {
+    for backend in [None, Some("minimal")] {
+        let home = tempfile::tempdir()?;
+        let mut session = start_history_session(backend, None, home.path())?;
+        session.expect_prompt()?;
+
+        session.send_line("echo needle-in-history")?;
+        session.expect("needle-in-history")?;
+        session.expect_prompt()?;
+
+        session
+            .get_session_mut()
+            .get_process_mut()
+            .kill(Signal::SIGHUP)
+            .context("sending SIGHUP")?;
+
+        // Wait for the process itself; the pty master can stay open while a reader thread
+        // drains it, so EOF is not a reliable sign that the shell has finished saving. Poll
+        // `status` rather than `is_alive`, which reaps the child and discards its status.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let mut status = WaitStatus::StillAlive;
+        while matches!(status, WaitStatus::StillAlive) && std::time::Instant::now() < deadline {
+            status = session.get_session().get_process().status()?;
+            if matches!(status, WaitStatus::StillAlive) {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+        }
+        assert!(
+            matches!(status, WaitStatus::Exited(_, 129)),
+            "unexpected exit status after SIGHUP (backend {backend:?}): {status:?}"
+        );
+
+        let contents = read_history_file(home.path());
+        assert!(
+            contents.contains("echo needle-in-history"),
+            "history lost on SIGHUP (backend {backend:?}): {contents:?}"
+        );
+    }
+
+    Ok(())
+}
+
 /// With immediate appends enabled, a command is on disk before the shell can be killed without
 /// running its normal exit path.
 #[test]
@@ -666,6 +711,84 @@ fn set_plus_o_history_toggles_recording() -> anyhow::Result<()> {
     assert!(!output.contains(": hidden"), "history: {output}");
 
     session.exit()?;
+
+    Ok(())
+}
+
+/// A foreground program receives the hangup too, so the shell stops waiting for it and can save
+/// the command it had already recorded.
+#[test]
+fn hangup_stops_foreground_job_and_saves_history() -> anyhow::Result<()> {
+    let home = tempfile::tempdir()?;
+    let mut session = start_history_session(None, None, home.path())?;
+    session.expect_prompt()?;
+
+    session.send_line("sleep 30")?;
+    std::thread::sleep(std::time::Duration::from_millis(300));
+
+    session
+        .get_session_mut()
+        .get_process_mut()
+        .kill(Signal::SIGHUP)
+        .context("sending SIGHUP")?;
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while session
+        .get_session()
+        .get_process()
+        .is_alive()
+        .unwrap_or(false)
+        && std::time::Instant::now() < deadline
+    {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    anyhow::ensure!(
+        !session
+            .get_session()
+            .get_process()
+            .is_alive()
+            .unwrap_or(false),
+        "shell kept waiting for a foreground job after SIGHUP"
+    );
+
+    let contents = read_history_file(home.path());
+    assert!(
+        contents.contains("sleep 30"),
+        "history lost while a foreground job was running: {contents:?}"
+    );
+
+    Ok(())
+}
+
+/// The normal on-exit path (an EXIT trap included) still runs after a hangup.
+#[test]
+fn hangup_runs_exit_trap() -> anyhow::Result<()> {
+    let home = tempfile::tempdir()?;
+    let mut session = start_history_session(None, None, home.path())?;
+    session.expect_prompt()?;
+
+    let trap_output = home.path().join("exit-trap");
+    session.send_line(format!(
+        "trap 'echo EXIT-TRAP > {}' EXIT; echo TRAP-SET",
+        brush_core::escape::single_quote(trap_output.to_str().context("trap path")?)
+    ))?;
+    session.expect("TRAP-SET")?;
+    session.expect_prompt()?;
+    session.send_line("echo needle")?;
+    session.expect_prompt()?;
+
+    session
+        .get_session_mut()
+        .get_process_mut()
+        .kill(Signal::SIGHUP)
+        .context("sending SIGHUP")?;
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !trap_output.exists() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert!(trap_output.exists(), "EXIT trap did not run after SIGHUP");
+    assert_eq!(std::fs::read_to_string(&trap_output)?, "EXIT-TRAP\n");
 
     Ok(())
 }

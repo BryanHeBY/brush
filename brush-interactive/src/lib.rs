@@ -1,6 +1,7 @@
 //! Library implementing interactive command input and completion for the brush shell.
 
 mod error;
+mod hangup;
 pub use error::ShellError;
 
 mod interactive_shell;

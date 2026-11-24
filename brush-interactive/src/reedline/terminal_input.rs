@@ -113,6 +113,13 @@ impl TerminalInput {
     }
 
     pub(super) fn read_event(&mut self, timeout: Duration) -> io::Result<Option<Event>> {
+        if crate::hangup::requested() {
+            return Err(io::Error::new(
+                io::ErrorKind::Interrupted,
+                "terminal hangup",
+            ));
+        }
+
         if let Ok(size) = crossterm::terminal::size()
             && self.size.replace(size).is_some_and(|old| old != size)
         {

@@ -109,6 +109,35 @@ impl<'a, IB: InputBackend, SE: brush_core::ShellExtensions> InteractiveShell<'a,
         })
     }
 
+    /// Watches for SIGHUP and records it for the input backends. Only the recorded flag is set
+    /// from the signal path; the loop saves history and runs the normal end-of-session path.
+    #[cfg(unix)]
+    fn watch_for_hangup() -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async {
+            let Ok(mut signal) =
+                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())
+            else {
+                return;
+            };
+            while signal.recv().await.is_some() {
+                crate::hangup::request();
+
+                // A foreground program is not in this process, so the signal driver did not
+                // deliver the hangup to it. Forward it, as a shell does for its jobs, so the
+                // shell can stop waiting and reach its history save.
+                if let (Some(foreground), Some(shell_group)) = (
+                    brush_core::sys::terminal::get_foreground_pid(),
+                    brush_core::sys::terminal::get_process_group_id(),
+                ) && foreground != shell_group
+                {
+                    // SAFETY: `killpg` takes a process group id; both ids came from the kernel.
+                    // A stale group makes it a no-op error, which is fine.
+                    let _ = unsafe { libc::killpg(foreground, libc::SIGHUP) };
+                }
+            }
+        })
+    }
+
     /// Runs the interactive shell loop, reading commands from standard input and writing
     /// results to standard output and standard error. Continues until the shell
     /// normally exits or until a fatal error occurs.
@@ -121,11 +150,20 @@ impl<'a, IB: InputBackend, SE: brush_core::ShellExtensions> InteractiveShell<'a,
 
         drop(shell);
 
+        crate::hangup::reset();
+        #[cfg(unix)]
+        let hangup_watcher = std::io::stdin().is_terminal().then(Self::watch_for_hangup);
+        #[cfg(not(unix))]
+        let hangup_watcher: Option<()> = None;
+
         // Run commands until the shell exits or input ends. The loop yields its result
         // rather than returning early on an error, so that the session still ends below.
         let looped = loop {
             let result = match self.run_interactively_once().await {
                 Ok(result) => result,
+                // A backend interrupted by the hangup reports the interruption as an error;
+                // the session still ends normally so history is saved and traps can run.
+                Err(_err) if crate::hangup::requested() => break Ok(()),
                 Err(err) => break Err(err),
             };
             match result {
@@ -170,15 +208,18 @@ impl<'a, IB: InputBackend, SE: brush_core::ShellExtensions> InteractiveShell<'a,
 
         let mut shell = self.shell.lock().await;
 
-        // End the session whether or not the loop failed. If both failed, the loop's error
-        // is the one to report.
+        // End the session whether or not the loop failed. Each step gets a chance to run even
+        // when an earlier one failed, and the loop's error is the one reported.
         let ended = shell.end_interactive_session();
-        looped?;
-        ended?;
 
-        if announce_exit {
-            writeln!(shell.stderr(), "exit")?;
+        if announce_exit && !crate::hangup::requested() {
+            let _ = writeln!(shell.stderr(), "exit");
         }
+
+        // Run on-exit operations (including an EXIT trap) before saving, so history changes the
+        // trap makes are included. A hangup's terminal may already be gone; that must not skip
+        // the save.
+        let exited = shell.on_exit().await;
 
         if let Err(e) = shell.save_history() {
             // N.B. This seems like the sort of thing that's worth being noisy about,
@@ -186,10 +227,20 @@ impl<'a, IB: InputBackend, SE: brush_core::ShellExtensions> InteractiveShell<'a,
             tracing::debug!("couldn't save history: {e}");
         }
 
-        // Give the shell an opportunity to perform any on-exit operations.
-        shell.on_exit().await?;
+        // A shell that was hung up exits with 128 + SIGHUP once its history is safe.
+        if crate::hangup::requested() {
+            shell.set_last_exit_status(129);
+        }
 
         drop(shell);
+
+        if let Some(watcher) = hangup_watcher {
+            watcher.abort();
+        }
+
+        looped?;
+        ended?;
+        exited?;
 
         Ok(())
     }
