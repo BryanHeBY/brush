@@ -223,7 +223,111 @@ fn mark_directories_off_keeps_filename_escaping() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Like readline, completion sees the whole line, not just the text before the cursor:/// Like readline, completion sees the whole line, not just the text before the cursor:/// Like readline, completion sees the whole line, not just the text before the cursor:/// Like readline, completion sees the whole line, not just the text before the cursor:/// Like readline, completion sees the whole line, not just the text before the cursor:
+/// Terminal-control sequences must go to the controlling terminal, not into a redirected
+/// stdout. Herdr still needs its OSC 7 directory update.
+#[test]
+fn redirected_stdout_does_not_receive_herdr_osc7() -> anyhow::Result<()> {
+    use std::io::Write as _;
+    use std::os::fd::AsRawFd as _;
+    use std::os::unix::process::CommandExt as _;
+
+    let temp = tempfile::tempdir()?;
+    let output = temp.path().join("stdout.txt");
+    let stdout = std::fs::File::create(&output)?;
+
+    let pty = nix::pty::openpty(None, None)?;
+    let slave = std::fs::File::from(pty.slave);
+    let shell_path = assert_cmd::cargo::cargo_bin!("brush");
+    let mut cmd = std::process::Command::new(shell_path);
+    cmd.args([
+        "--norc",
+        "--noprofile",
+        "--no-config",
+        "--disable-bracketed-paste",
+        "--disable-color",
+        "--enable-terminal-integration",
+        "--input-backend=basic",
+    ]);
+    cmd.stdin(std::process::Stdio::from(slave.try_clone()?));
+    cmd.stderr(std::process::Stdio::from(slave));
+    cmd.stdout(std::process::Stdio::from(stdout));
+    cmd.env("PS1", PROMPT);
+    cmd.env("TERM", "xterm-256color");
+    cmd.env("TERM_PROGRAM", "herdr");
+    cmd.env("HOME", temp.path());
+    cmd.env("HISTFILE", "");
+    // SAFETY: the pre-exec hook makes the child a session leader with the test PTY as its
+    // controlling terminal; it only calls async-signal-safe functions.
+    unsafe {
+        cmd.pre_exec(|| {
+            nix::unistd::setsid()?;
+            if libc::ioctl(0, libc::TIOCSCTTY, 0) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let mut child = cmd.spawn()?;
+    let mut master = std::fs::File::from(pty.master);
+    let flags = unsafe { libc::fcntl(master.as_raw_fd(), libc::F_GETFL) };
+    unsafe {
+        libc::fcntl(master.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK);
+    }
+
+    let read_available = |file: &mut std::fs::File, buffer: &mut Vec<u8>| {
+        let mut chunk = [0_u8; 4096];
+        match std::io::Read::read(file, &mut chunk) {
+            Ok(0) => {}
+            Ok(count) => buffer.extend_from_slice(&chunk[..count]),
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+            Err(_) => {}
+        }
+    };
+
+    let mut terminal_bytes = Vec::new();
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while std::time::Instant::now() < deadline {
+        read_available(&mut master, &mut terminal_bytes);
+        let text = String::from_utf8_lossy(&terminal_bytes);
+        if text.contains("\x1b]7;file://") && text.contains(PROMPT) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let terminal_text = String::from_utf8_lossy(&terminal_bytes);
+    assert!(
+        terminal_text.contains("\x1b]7;file://"),
+        "terminal did not receive OSC 7: {terminal_text:?}"
+    );
+    assert!(
+        terminal_text.contains(PROMPT),
+        "no prompt on the terminal: {terminal_text:?}"
+    );
+
+    master.write_all(b"echo payload\n")?;
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while std::time::Instant::now() < deadline {
+        if std::fs::read_to_string(&output).is_ok_and(|text| text.contains("payload")) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let contents = std::fs::read_to_string(&output)?;
+    assert!(
+        contents.contains("payload"),
+        "command output was not captured: {contents:?}"
+    );
+    assert!(
+        !contents.contains("\x1b]7;"),
+        "OSC 7 leaked into redirected stdout: {contents:?}"
+    );
+
+    let _ = child.kill();
+    let _ = child.wait();
+    Ok(())
+}
+
+/// Like readline, completion sees the whole line, not just the text before the cursor:/// Like readline, completion sees the whole line, not just the text before the cursor:/// Like readline, completion sees the whole line, not just the text before the cursor:/// Like readline, completion sees the whole line, not just the text before the cursor:/// Like readline, completion sees the whole line, not just the text before the cursor:/// Like readline, completion sees the whole line, not just the text before the cursor:
 /// e.g. `COMP_WORDS` includes words after it.
 #[test]
 fn completion_sees_text_after_cursor() -> anyhow::Result<()> {

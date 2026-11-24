@@ -72,9 +72,29 @@ impl TerminalIntegration {
     /// the shell does next. Writing nothing still flushes; that costs nothing and keeps the
     /// inert case from being a separate path.
     fn write(seq: &str) -> std::io::Result<()> {
-        let mut stdout = std::io::stdout();
-        stdout.write_all(seq.as_bytes())?;
-        stdout.flush()
+        if seq.is_empty() {
+            return Ok(());
+        }
+        // Terminal control belongs on the terminal, not on whatever stdout has been
+        // redirected to. `/dev/tty` / `CONOUT$` is the controlling terminal even when stdout
+        // is a file or pipe.
+        #[cfg(unix)]
+        let mut output: Box<dyn std::io::Write> =
+            match std::fs::OpenOptions::new().write(true).open("/dev/tty") {
+                Ok(file) => Box::new(file),
+                Err(_) => Box::new(std::io::stdout()),
+            };
+        #[cfg(windows)]
+        let mut output: Box<dyn std::io::Write> =
+            match std::fs::OpenOptions::new().write(true).open("CONOUT$") {
+                Ok(file) => Box::new(file),
+                Err(_) => Box::new(std::io::stdout()),
+            };
+        #[cfg(not(any(unix, windows)))]
+        let mut output: Box<dyn std::io::Write> = Box::new(std::io::stdout());
+
+        output.write_all(seq.as_bytes())?;
+        output.flush()
     }
 
     /// Returns the terminal escape sequence that should be emitted to initialize terminal
