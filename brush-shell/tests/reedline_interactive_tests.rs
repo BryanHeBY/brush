@@ -1613,6 +1613,16 @@ fn start_reedline_session_with(
     ]);
     cmd.env("PS1", PROMPT);
     cmd.env("TERM", "xterm-256color");
+
+    // Isolate every test from the caller's shell configuration. Individual tests can still
+    // override these with `configure`, but the default must not read the developer's history
+    // or key bindings.
+    let test_home = tempfile::tempdir()?.keep();
+    let test_inputrc = test_home.join("inputrc");
+    std::fs::write(&test_inputrc, "")?;
+    cmd.env("HOME", &test_home)
+        .env("INPUTRC", &test_inputrc)
+        .env("HISTFILE", test_home.join("history"));
     configure(&mut cmd);
 
     let session = expectrl::session::Session::spawn(cmd)?;
