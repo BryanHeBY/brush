@@ -988,19 +988,34 @@ fn lock_history_file(path: &Path) -> Result<crate::sys::fs::HistoryFileLock, err
     Ok(crate::sys::fs::lock_history_file(file)?)
 }
 
-/// Writes `contents` to a temporary file next to `path`, then renames it over `path`.
+/// Writes `contents` to a temporary file next to the target, then renames it into place.
+///
+/// A symlinked history file is resolved and its target is replaced, leaving the link in
+/// place. The target's existing permissions are copied to the replacement, so a private
+/// history file does not become world-readable after a rewrite.
 fn atomic_write(path: &Path, contents: &[u8]) -> Result<(), error::Error> {
-    let file_name = path.file_name().ok_or_else(|| {
+    let target = match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => std::fs::canonicalize(path)?,
+        _ => path.to_path_buf(),
+    };
+    let permissions = std::fs::metadata(&target)
+        .ok()
+        .map(|metadata| metadata.permissions());
+
+    let file_name = target.file_name().ok_or_else(|| {
         std::io::Error::new(std::io::ErrorKind::InvalidInput, "invalid history file")
     })?;
     let mut temp_name = std::ffi::OsString::from(".");
     temp_name.push(file_name);
     temp_name.push(format!(".tmp.{}", std::process::id()));
-    let temp_path = path.with_file_name(temp_name);
+    let temp_path = target.with_file_name(temp_name);
 
     let result = (|| -> Result<(), error::Error> {
         std::fs::write(&temp_path, contents)?;
-        std::fs::rename(&temp_path, path)?;
+        if let Some(permissions) = permissions {
+            std::fs::set_permissions(&temp_path, permissions)?;
+        }
+        std::fs::rename(&temp_path, &target)?;
         Ok(())
     })();
     if result.is_err() {
@@ -1245,6 +1260,35 @@ mod tests {
         history.flush(&path, false, false, false)?;
         assert_eq!(read()?, "old\nnew1\nnew2\n");
 
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rewrite_preserves_permissions_and_follows_symlinks() -> Result<(), error::Error> {
+        use std::os::unix::fs::{PermissionsExt as _, symlink};
+
+        let dir = tempfile::tempdir()?;
+        let target = dir.path().join("target-history");
+        std::fs::write(&target, "old\n")?;
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o600))?;
+
+        let link = dir.path().join("history-link");
+        symlink(&target, &link)?;
+
+        let mut history = History::default();
+        history.add(Item::new("new-entry"))?;
+        history.save_with_limit(&link, false, false, false, None)?;
+
+        assert!(
+            std::fs::symlink_metadata(&link)?.file_type().is_symlink(),
+            "rewrite replaced the symlink"
+        );
+        assert_eq!(std::fs::read_to_string(&target)?, "new-entry\n");
+        assert_eq!(
+            std::fs::metadata(&target)?.permissions().mode() & 0o777,
+            0o600
+        );
         Ok(())
     }
 
