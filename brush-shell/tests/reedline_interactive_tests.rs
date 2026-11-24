@@ -405,7 +405,7 @@ fn command_can_read_input_after_editor_returns() -> anyhow::Result<()> {
     let mut session = start_reedline_session()?;
     expect_next_prompt(&mut session, 0)?;
 
-    session.send_line("echo READY; sleep 1; read -n 1 ch; printf 'GOT=<%s>\\n' \"$ch\"")?;
+    session.send_line("echo READY; read -t 5 -n 1 ch; printf 'GOT=<%s>\\n' \"$ch\"")?;
     session.expect("READY").context("command did not start")?;
     session.send("z")?;
     session
