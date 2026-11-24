@@ -163,6 +163,14 @@ pub(crate) fn trim_history_file(
     max_items: usize,
     mode: crate::history::HistoryWriteMode,
 ) -> Result<(), error::Error> {
+    if !path.try_exists()? {
+        return Ok(());
+    }
+    // A cooperating writer can append or replace the file while we wait for the lock.
+    // Take the snapshot only after obtaining it and keep it through the replacement.
+    let _lock = (mode == crate::history::HistoryWriteMode::Portable)
+        .then(|| lock_history_file(path))
+        .transpose()?;
     let contents = match std::fs::read(path) {
         Ok(contents) => contents,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
@@ -172,7 +180,11 @@ pub(crate) fn trim_history_file(
     if trimmed == contents {
         return Ok(());
     }
-    replace_contents(path, &trimmed, mode)
+    if mode == crate::history::HistoryWriteMode::Portable {
+        atomic_write(path, &trimmed)
+    } else {
+        write_in_place(path, &trimmed)
+    }
 }
 
 /// Replaces a history file with `contents` using the configured write policy.
@@ -331,4 +343,52 @@ pub(crate) fn atomic_write(path: &Path, contents: &[u8]) -> Result<(), error::Er
         let _ = std::fs::remove_file(&temp_path);
     }
     result
+}
+
+#[cfg(test)]
+#[cfg(any(unix, windows))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn portable_trim_retains_appends_from_the_current_lock_holder() -> anyhow::Result<()> {
+        use std::{fs::OpenOptions, sync::mpsc, time::Duration};
+
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("history");
+        std::fs::write(&path, b"old1\nold2\nold3\n")?;
+        let lock = lock_history_file(&path)?;
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let (done_tx, done_rx) = mpsc::channel();
+        let trim_path = path.clone();
+        let trim = std::thread::spawn(move || {
+            let _ = ready_tx.send(());
+            let result =
+                trim_history_file(&trim_path, 2, crate::history::HistoryWriteMode::Portable);
+            let _ = done_tx.send(());
+            result
+        });
+
+        let ready = ready_rx.recv_timeout(Duration::from_secs(5));
+        let waited = done_rx.recv_timeout(Duration::from_millis(100));
+        let append = (|| -> std::io::Result<()> {
+            let mut file = OpenOptions::new().append(true).open(&path)?;
+            file.write_all(b"other-session\n")
+        })();
+        drop(lock);
+        trim.join()
+            .map_err(|_| anyhow::anyhow!("trim thread panicked"))??;
+
+        ready?;
+        anyhow::ensure!(
+            matches!(waited, Err(mpsc::RecvTimeoutError::Timeout)),
+            "trim did not wait for the sidecar lock"
+        );
+        append?;
+        anyhow::ensure!(
+            std::fs::read(&path)? == b"old3\nother-session\n",
+            "trim discarded the concurrent append"
+        );
+        Ok(())
+    }
 }
