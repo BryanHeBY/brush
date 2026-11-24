@@ -59,7 +59,10 @@ impl<SE: extensions::ShellExtensions> Shell<SE> {
 
         // As bash does, skip the file if startup files already added entries (e.g. via
         // `history -s`). Do NOT fail if we can't load history.
-        if self.options.enable_command_history
+        // As in bash, only an interactive shell loads the history file at startup;
+        // `set -o history` in a non-interactive shell enables recording, not importing.
+        if self.options.interactive
+            && self.options.enable_command_history
             && self
                 .history
                 .as_ref()

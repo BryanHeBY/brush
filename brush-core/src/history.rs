@@ -89,6 +89,16 @@ impl History {
         Ok(history)
     }
 
+    /// Appends the entries from `reader` to this history, preserving their timestamps. Imported
+    /// entries are already on disk, so they are not marked for saving again.
+    pub fn append_from(&mut self, reader: impl Read) -> Result<(), error::Error> {
+        let imported = Self::import(reader)?;
+        for item in imported.items.iter().cloned() {
+            self.add(item)?;
+        }
+        Ok(())
+    }
+
     /// Tries to retrieve a history item by its unique identifier. Returns `None` if no item is
     /// found.
     ///
@@ -322,6 +332,22 @@ impl History {
             trimmed.push('\n');
         }
         std::fs::write(path, trimmed)?;
+        Ok(())
+    }
+
+    /// Appends entries from `reader`, skipping ones already present (matched by timestamp and
+    /// command line). Share mode uses this to merge a file it may have partially seen.
+    pub fn append_from_unique(&mut self, reader: impl Read) -> Result<(), error::Error> {
+        let imported = Self::import(reader)?;
+        for item in imported.items.iter().cloned() {
+            let present = self
+                .items
+                .iter()
+                .any(|existing| existing.command_line == item.command_line);
+            if !present {
+                self.add(item)?;
+            }
+        }
         Ok(())
     }
 

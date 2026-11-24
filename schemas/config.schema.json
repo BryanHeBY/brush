@@ -51,6 +51,14 @@
             "null"
           ],
           "default": null
+        },
+        "share": {
+          "description": "Import new entries other sessions append to the history file, and append this session's\ncommands as they finish.",
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "default": null
         }
       }
     },

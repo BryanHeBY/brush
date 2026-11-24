@@ -39,6 +39,9 @@ pub struct InteractiveOptions {
     pub zsh_style_hooks: bool,
     /// Whether to append each command to the history file as soon as it finishes.
     pub history_append_immediately: bool,
+    /// Whether to import new history file entries and append this session's commands as they
+    /// finish.
+    pub history_share: bool,
 }
 
 /// Reads `PROMPT_COMMAND` as bash does: a string is a single command, an indexed array is one
@@ -159,6 +162,14 @@ impl<'a, IB: InputBackend, SE: brush_core::ShellExtensions> InteractiveShell<'a,
         // Run commands until the shell exits or input ends. The loop yields its result
         // rather than returning early on an error, so that the session still ends below.
         let looped = loop {
+            // Share mode: bring in what other sessions have appended before drawing a prompt.
+            if self.options.history_share {
+                let mut shell = self.shell.lock().await;
+                if let Err(e) = shell.read_new_history() {
+                    tracing::debug!("couldn't read new history: {e}");
+                }
+            }
+
             let result = match self.run_interactively_once().await {
                 Ok(result) => result,
                 // A backend interrupted by the hangup reports the interruption as an error;
@@ -193,8 +204,15 @@ impl<'a, IB: InputBackend, SE: brush_core::ShellExtensions> InteractiveShell<'a,
 
             // With the zsh-style opt-in, persist what this command added before waiting for the
             // next one. A failure leaves the items unsaved for the next attempt.
-            if self.options.history_append_immediately {
+            if self.options.history_append_immediately || self.options.history_share {
                 let mut shell = self.shell.lock().await;
+                // Import first, so another session's entries written while this command ran
+                // are not skipped when the save advances the read position past them.
+                if self.options.history_share
+                    && let Err(e) = shell.read_new_history()
+                {
+                    tracing::debug!("couldn't read new history: {e}");
+                }
                 if let Err(e) = shell.save_history() {
                     tracing::debug!("couldn't append history: {e}");
                 }

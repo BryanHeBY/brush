@@ -79,6 +79,15 @@ impl<SE: brush_core::ShellExtensions> builtins::Builtin<SE> for HistoryCommand {
         let stdout = context.stdout();
         let stderr = context.stderr();
 
+        if self.append_rest_of_file_to_session || self.append_file_to_session {
+            let path = self.args.first().map(Path::new);
+            let new_only = self.append_rest_of_file_to_session;
+            return context
+                .shell
+                .read_history_file(path, new_only)
+                .map(|()| ExecutionResult::success());
+        }
+
         if let Some(history) = context.shell.history_mut() {
             self.execute_with_history(history, &config, stdout, stderr)
         } else {
@@ -140,14 +149,6 @@ impl HistoryCommand {
             }
 
             return Ok(ExecutionResult::success());
-        }
-
-        if self.append_rest_of_file_to_session {
-            return error::unimp("history -n is not yet implemented");
-        }
-
-        if self.append_file_to_session {
-            return error::unimp("history -r is not yet implemented");
         }
 
         if self.write_session_to_file {

@@ -793,6 +793,44 @@ fn hangup_runs_exit_trap() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Share mode imports entries another session appended before drawing the next prompt.
+#[test]
+fn share_imports_other_sessions_commands() -> anyhow::Result<()> {
+    let home = tempfile::tempdir()?;
+    let config = home.path().join("config.toml");
+    std::fs::write(&config, "[history]\nshare = true\n")?;
+
+    let mut first =
+        start_history_session(Some("basic"), Some(&config), home.path()).context("first shell")?;
+    let mut second =
+        start_history_session(Some("basic"), Some(&config), home.path()).context("second shell")?;
+    first.set_echo(true);
+    second.set_echo(true);
+    first.expect_prompt().context("first prompt")?;
+    second.expect_prompt().context("second prompt")?;
+
+    first.send_line("echo from-first-session")?;
+    first.expect("from-first-session")?;
+    first.expect_prompt().context("first command")?;
+
+    // Move the second shell through a prompt so share mode imports what the first wrote.
+    second.send_line(": share-sync")?;
+    second.expect_prompt().context("second sync")?;
+
+    second.send_line("history > \"$HOME/shared-history.txt\"; echo SHARE-DONE")?;
+    second.expect("SHARE-DONE")?;
+    second.expect_prompt().context("second command")?;
+
+    let seen = std::fs::read_to_string(home.path().join("shared-history.txt"))
+        .context("read shared history output")?;
+    assert!(
+        seen.contains("echo from-first-session"),
+        "shared history did not include the other session's command: {seen:?}"
+    );
+
+    Ok(())
+}
+
 type ShellSession = ReplSession<Session<UnixProcess, LogStream<PtyStream, std::io::Stdout>>>;
 type RawShellSession = ReplSession<Session<UnixProcess, PtyStream>>;
 // N.B. Comment out the above line and uncomment out the following line to disable logging of the

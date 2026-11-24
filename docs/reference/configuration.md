@@ -84,6 +84,7 @@ Command history settings.
 | Setting               | Type    | Default | Description                                              |
 |-----------------------|---------|---------|----------------------------------------------------------|
 | `append-immediately`  | boolean | `false` | Append each command to the history file as it finishes   |
+| `share`               | boolean | `false` | Import other sessions' new entries and append this session's |
 
 By default, an interactive shell appends the commands it recorded when the session ends
 normally, as bash does. If the terminal is closed, brush saves the history before exiting;
@@ -92,6 +93,11 @@ commands still running at that moment may not have been appended yet.
 With `append-immediately = true`, brush appends the command right after it finishes instead
 of waiting for the session to end. This is the zsh `INC_APPEND_HISTORY` style: the file is a
 step behind only while a command is still running.
+
+`share = true` is the zsh `SHARE_HISTORY` style: before each prompt brush imports entries
+other sessions appended to the file, and after each command it appends this session's new
+entries. It implies immediate appending. Entries already in the session are skipped by command
+line, and a very large history file makes each prompt more expensive to check.
 
 The history file is `$HISTFILE`, which defaults to `~/.brush_history`. Setting `HISTFILE` to
 an empty string keeps history in memory but disables reading and writing the file.

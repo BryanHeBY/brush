@@ -155,6 +155,35 @@ cases:
       echo "[histfile after second -w]"
       cat $HISTFILE
 
+  - name: "history -r reads the file into the session"
+    args: ["-o", "history"]
+    env:
+      HISTFILE: "history-file.txt"
+    test_files:
+      - path: "history-file.txt"
+        contents: |
+          from-file-1
+          from-file-2
+    stdin: |
+      history -r
+      history
+      unset HISTFILE # only the session view is compared here
+
+  - name: "history -n reads only entries appended since the last read"
+    args: ["-o", "history"]
+    env:
+      HISTFILE: "history-file.txt"
+    test_files:
+      - path: "history-file.txt"
+        contents: |
+          from-file-1
+    stdin: |
+      history -r
+      printf 'from-other\n' >> "$HISTFILE"
+      history -n
+      history
+      unset HISTFILE # leave the appended file as both shells wrote it
+
   - name: "history -w with explicit file"
     args: ["-o", "history"]
     env:

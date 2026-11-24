@@ -1,6 +1,10 @@
 //! History management for shells.
 
-use std::{collections::BTreeSet, path::PathBuf};
+use std::{
+    collections::BTreeSet,
+    io::{Seek, SeekFrom},
+    path::{Path, PathBuf},
+};
 
 use crate::{error, history::HistoryControl, openfiles, patterns};
 
@@ -111,6 +115,77 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
         self.env_str("HISTTIMEFORMAT").map(|s| s.into_owned())
     }
 
+    /// Reads history from `path` (or the shell's history file) into the current session.
+    ///
+    /// `new_only` reads from the position reached by the last read or save, so a shared file
+    /// can contribute the entries another session wrote without re-importing the whole file.
+    /// A file shorter than the recorded position was truncated or replaced; it is read from the
+    /// beginning.
+    pub fn read_history_file(
+        &mut self,
+        path: Option<&Path>,
+        new_only: bool,
+    ) -> Result<(), error::Error> {
+        let Some(path) = path
+            .map(Path::to_path_buf)
+            .or_else(|| self.history_file_path())
+        else {
+            return Ok(());
+        };
+
+        let mut file = std::fs::File::open(&path)?;
+        let length = file.metadata()?.len();
+
+        let offset = if new_only {
+            match &self.history_read_position {
+                Some((position_path, position))
+                    if position_path == &path && *position <= length =>
+                {
+                    *position
+                }
+                _ => 0,
+            }
+        } else {
+            0
+        };
+        file.seek(SeekFrom::Start(offset))?;
+
+        let size_limit = self.history_size_limit();
+        let Some(history) = &mut self.history else {
+            return Err(error::ErrorKind::HistoryNotEnabled.into());
+        };
+        history.append_from(file)?;
+        if let Some(limit) = size_limit {
+            history.retain_last(limit);
+        }
+        self.history_read_position = Some((path, length));
+
+        Ok(())
+    }
+
+    /// Reads entries other sessions appended to the shell's history file since this session last
+    /// read or saved it.
+    pub fn read_new_history(&mut self) -> Result<(), error::Error> {
+        // A session that has not saved yet has no file; that is not an error for share mode.
+        let Some(path) = self.history_file_path() else {
+            return Ok(());
+        };
+        let Ok(file) = std::fs::File::open(&path) else {
+            return Ok(());
+        };
+
+        let size_limit = self.history_size_limit();
+        let Some(history) = &mut self.history else {
+            return Err(error::ErrorKind::HistoryNotEnabled.into());
+        };
+        history.append_from_unique(file)?;
+        if let Some(limit) = size_limit {
+            history.retain_last(limit);
+        }
+
+        Ok(())
+    }
+
     /// Saves history back to any backing storage.
     pub fn save_history(&mut self) -> Result<(), error::Error> {
         if let Some(history_file_path) = self.history_file_path() {
@@ -134,6 +209,12 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
                 if let Some(limit) = file_limit {
                     history.truncate_file(history_file_path.as_path(), limit)?;
                 }
+            }
+
+            // Remember where this session's writes end, so share mode doesn't import them
+            // again as if another shell had written them.
+            if let Ok(metadata) = std::fs::metadata(&history_file_path) {
+                self.history_read_position = Some((history_file_path, metadata.len()));
             }
         }
 

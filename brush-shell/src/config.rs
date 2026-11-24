@@ -54,6 +54,11 @@ pub struct HistoryConfig {
     /// Append each command to the history file as soon as it finishes.
     #[serde(rename = "append-immediately")]
     pub append_immediately: Option<bool>,
+
+    /// Import new entries other sessions append to the history file, and append this session's
+    /// commands as they finish.
+    #[serde(rename = "share")]
+    pub share: Option<bool>,
 }
 
 /// Experimental features configuration.
@@ -115,6 +120,7 @@ impl Config {
                 self.ui.history_suggestion_navigation.unwrap_or_default(),
             )
             .history_append_immediately(self.history.append_immediately.unwrap_or_default())
+            .history_share(self.history.share.unwrap_or_default())
             .terminal_shell_integration(terminal_shell_integration)
             .zsh_style_hooks(zsh_style_hooks)
             .build()

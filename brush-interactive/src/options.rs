@@ -22,6 +22,9 @@ pub struct UIOptions {
     /// Whether to append each command to the history file as soon as it finishes.
     #[builder(default)]
     pub history_append_immediately: bool,
+    /// Whether to share the history file with other sessions.
+    #[builder(default)]
+    pub history_share: bool,
 }
 
 impl From<&UIOptions> for crate::InteractiveOptions {
@@ -30,6 +33,7 @@ impl From<&UIOptions> for crate::InteractiveOptions {
             terminal_shell_integration: options.terminal_shell_integration,
             zsh_style_hooks: options.zsh_style_hooks,
             history_append_immediately: options.history_append_immediately,
+            history_share: options.history_share,
         }
     }
 }

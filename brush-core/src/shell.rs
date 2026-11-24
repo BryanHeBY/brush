@@ -166,6 +166,10 @@ pub struct Shell<SE: extensions::ShellExtensions = extensions::DefaultShellExten
 
     /// History of commands executed in the shell.
     history: Option<crate::history::History>,
+
+    /// Byte offset already imported from the history file, for `history -n` and share mode.
+    #[cfg_attr(feature = "serde", serde(skip))]
+    history_read_position: Option<(std::path::PathBuf, u64)>,
 }
 
 impl<SE: extensions::ShellExtensions> Clone for Shell<SE> {
@@ -211,6 +215,7 @@ impl<SE: extensions::ShellExtensions> Clone for Shell<SE> {
             parser_impl: self.parser_impl,
             key_bindings: self.key_bindings.clone(),
             history: self.history.clone(),
+            history_read_position: self.history_read_position.clone(),
             depth: self.depth + 1,
             command_number: self.command_number,
         }
