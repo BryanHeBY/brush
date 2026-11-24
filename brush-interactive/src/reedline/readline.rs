@@ -270,6 +270,30 @@ struct HistorySuggestion {
     id: i64,
 }
 
+/// Returns the byte length of the part of `candidate` that matched `prefix`, always on a
+/// character boundary. Case-insensitive matching lowercases text, whose byte length can differ
+/// from the query (for example `K` -> `k`), so the query's length must not be used directly.
+fn matched_prefix_len(candidate: &str, prefix: &str, ignore_case: bool) -> Option<usize> {
+    if !ignore_case {
+        return candidate.starts_with(prefix).then_some(prefix.len());
+    }
+
+    let lowercase_prefix = prefix.to_lowercase();
+    if lowercase_prefix.is_empty() {
+        return Some(0);
+    }
+    let mut lowercase = String::new();
+    for (index, character) in candidate.char_indices() {
+        lowercase.extend(character.to_lowercase());
+        if lowercase.len() >= lowercase_prefix.len() {
+            return lowercase
+                .starts_with(&lowercase_prefix)
+                .then_some(index + character.len_utf8());
+        }
+    }
+    None
+}
+
 fn history_matches<'a>(
     history: &'a history::History,
     prefix: &str,
@@ -570,7 +594,12 @@ impl ReadlineSession {
             backward,
             self.options.search_ignore_case,
         ) && let Some((id, suffix)) = entries.find_map(|entry| {
-            let suffix = entry.command_line.get(current.text.len()..)?;
+            let matched = matched_prefix_len(
+                &entry.command_line,
+                &current.text,
+                self.options.search_ignore_case,
+            )?;
+            let suffix = entry.command_line.get(matched..)?;
             (!suffix.is_empty() && selected.is_none_or(|hint| suffix != hint.suffix))
                 .then_some((entry.id, suffix))
         }) {
@@ -625,7 +654,7 @@ impl ReadlineSession {
                 } else if prefix.is_empty() {
                     item.command_line.len()
                 } else {
-                    prefix.len()
+                    matched_prefix_len(&item.command_line, prefix, self.options.search_ignore_case)?
                 },
             };
             self.history = Some(HistorySearch {
@@ -924,5 +953,22 @@ impl<SE: brush_core::ShellExtensions> reedline::Menu for ActionMenu<SE> {
     }
     fn get_values(&self) -> &[reedline::Suggestion] {
         &[]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::matched_prefix_len;
+
+    #[test]
+    fn matched_prefix_len_uses_original_character_boundaries() {
+        assert_eq!(matched_prefix_len("abc", "ab", false), Some(2));
+        assert_eq!(matched_prefix_len("abc", "ab", true), Some(2));
+        assert_eq!(matched_prefix_len(": k界", ": K", true), Some(3));
+        assert_eq!(matched_prefix_len(": K界", ": K", true), Some(3));
+        assert_eq!(matched_prefix_len(": k界", ": K", true), Some(3));
+        assert_eq!(matched_prefix_len("İ", "i", true), Some(2));
+        assert_eq!(matched_prefix_len("界", "k", true), None);
+        assert_eq!(matched_prefix_len("abc", "", true), Some(0));
     }
 }

@@ -74,7 +74,49 @@ fn bound_key_runs_command_and_shell_survives() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Like readline, completion sees the whole line, not just the text before the cursor:
+/// Case-insensitive history search must place the cursor on a character boundary in the
+/// recalled text even when lowercasing changes the query's byte length (`K` -> `k`).
+#[test]
+fn unicode_history_search_recalls_on_character_boundary() -> anyhow::Result<()> {
+    let temp = tempfile::tempdir()?;
+    let history = temp.path().join("history");
+    std::fs::write(&history, ": k界\n")?;
+    let inputrc = temp.path().join("inputrc");
+    std::fs::write(
+        &inputrc,
+        "set search-ignore-case on\n\"\\C-t\": history-search-backward\n",
+    )?;
+
+    let mut session = start_reedline_session_with(|cmd| {
+        cmd.env("HOME", temp.path())
+            .env("INPUTRC", &inputrc)
+            .env("HISTFILE", &history);
+    })?;
+    expect_next_prompt(&mut session, 0)?;
+
+    session.send(": K")?;
+    session.send("\x14")?;
+    // The cursor sits after the matched `k`; move to the end so the whole recalled line is
+    // painted as one contiguous run.
+    session.send("\x05")?;
+    session
+        .expect(": k界")
+        .context("case-insensitive search did not recall the entry")?;
+
+    // Move left, delete a character, and type: all of these use the recalled buffer's
+    // cursor, which previously landed inside `界`'s UTF-8 encoding.
+    session.send("\x1b[D\x7fZ\r")?;
+    expect_next_prompt(&mut session, 0).context("shell died after editing recalled text")?;
+
+    session.send_line("echo ALIVE_$((40+2))")?;
+    session
+        .expect("ALIVE_42")
+        .context("shell did not survive editing the recalled text")?;
+
+    Ok(())
+}
+
+/// Like readline, completion sees the whole line, not just the text before the cursor:/// Like readline, completion sees the whole line, not just the text before the cursor:
 /// e.g. `COMP_WORDS` includes words after it.
 #[test]
 fn completion_sees_text_after_cursor() -> anyhow::Result<()> {
