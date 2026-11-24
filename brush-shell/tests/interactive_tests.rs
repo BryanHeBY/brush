@@ -1233,6 +1233,28 @@ fn history_n_starts_after_startup_import() -> anyhow::Result<()> {
         "{completed:?}"
     );
 
+    // A timestamp alone is half a record; do not consume it until the command arrives.
+    std::fs::write(&history_path, "#1700000000\n")?;
+    session.send_line("history -n")?;
+    session.expect_prompt()?;
+    let timestamp_only = snapshot(&mut session, "timestamp-only.txt")?;
+    assert!(
+        !timestamp_only.contains("timestamp-body"),
+        "{timestamp_only:?}"
+    );
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(&history_path)?
+        .write_all(b"timestamp-body\n")?;
+    session.send_line("history -n")?;
+    session.expect_prompt()?;
+    let timestamped = snapshot(&mut session, "timestamped.txt")?;
+    assert_eq!(
+        timestamped.matches("timestamp-body").count(),
+        1,
+        "{timestamped:?}"
+    );
+
     // An explicit path is read independently of the default file's cursor.
     let other = home.path().join("other-history");
     std::fs::write(&other, "other-entry\n")?;

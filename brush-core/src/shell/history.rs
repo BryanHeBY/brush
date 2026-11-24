@@ -177,6 +177,49 @@ fn split_ignore_patterns(ignore: &str) -> Vec<String> {
     patterns
 }
 
+/// Returns the end of the last complete history record in `bytes`.
+///
+/// A newline normally completes a record, but in a timestamped file a timestamp without a
+/// following command is only half a record. Leave that timestamp for the next read rather than
+/// committing the cursor past it.
+fn complete_record_end(bytes: &[u8]) -> usize {
+    let Some(last_newline) = bytes.iter().rposition(|byte| *byte == b'\n') else {
+        return 0;
+    };
+    let end = last_newline + 1;
+    let lines: Vec<&[u8]> = bytes[..last_newline].split(|byte| *byte == b'\n').collect();
+    let is_timestamp = |line: &[u8]| {
+        line.strip_prefix(b"#")
+            .and_then(|rest| std::str::from_utf8(rest).ok())
+            .is_some_and(|rest| rest.trim().parse::<i64>().is_ok())
+    };
+    if !lines.iter().any(|line| is_timestamp(line)) {
+        return end;
+    }
+
+    let mut offset = 0;
+    let mut timestamp_start = None;
+    let mut has_command = false;
+    for line in lines {
+        if is_timestamp(line) {
+            if timestamp_start.is_some() && !has_command {
+                return timestamp_start.unwrap_or(offset);
+            }
+            timestamp_start = Some(offset);
+            has_command = false;
+        } else if !line.is_empty() || timestamp_start.is_some() {
+            has_command = true;
+        }
+        offset += line.len() + 1;
+    }
+
+    if timestamp_start.is_some() && !has_command {
+        timestamp_start.unwrap_or(end)
+    } else {
+        end
+    }
+}
+
 /// Returns the identity used to detect a replaced history file.
 fn history_file_identity(metadata: &std::fs::Metadata) -> super::HistoryFileId {
     #[cfg(unix)]
@@ -326,18 +369,14 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
         let mut bytes = Vec::new();
         file.read_to_end(&mut bytes)?;
 
-        let complete_end = bytes
-            .iter()
-            .rposition(|byte| *byte == b'\n')
-            .map_or(0, |index| index + 1);
+        let complete_end = complete_record_end(&bytes);
         let checksum_at = |offset: usize| tail_checksum(&bytes[..offset]);
 
         let offset = if new_only {
             match &self.history_read_position {
-                Some((position_path, position, stored_id, stored_checksum))
+                Some((position_path, position, _stored_id, stored_checksum))
                     if position_path == &path
                         && (*position as usize) <= complete_end
-                        && (stored_id.is_none() || stored_id == &file_id)
                         && checksum_at(*position as usize) == *stored_checksum =>
                 {
                     *position as usize
@@ -385,10 +424,7 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
         let Ok(bytes) = std::fs::read(&path) else {
             return;
         };
-        let complete_end = bytes
-            .iter()
-            .rposition(|byte| *byte == b'\n')
-            .map_or(0, |index| index + 1);
+        let complete_end = complete_record_end(&bytes);
         self.history_read_position = Some((
             path,
             complete_end as u64,
@@ -569,6 +605,57 @@ mod tests {
     use super::*;
     use crate::{history::History, variables::ShellVariable};
     use std::io::Write as _;
+
+    #[tokio::test]
+    async fn share_reads_new_entries_after_an_atomic_rewrite() -> Result<(), error::Error> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("history");
+        std::fs::write(&path, "old-entry\n")?;
+
+        let loaded = History::import(std::fs::File::open(&path)?)?;
+        let mut shell = crate::Shell::builder().build().await?;
+        shell.set_env_global(
+            "HISTFILE",
+            ShellVariable::new(path.to_string_lossy().to_string()),
+        )?;
+        shell.history = Some(loaded);
+        shell.remember_history_file_position();
+
+        // Simulate another session's normal exit: the whole file is moved into a new inode
+        // while retaining the old prefix and adding one record.
+        let replacement = dir.path().join("replacement");
+        std::fs::write(&replacement, "old-entry\nnew-entry\n")?;
+        std::fs::rename(&replacement, &path)?;
+
+        shell.read_new_history()?;
+
+        let lines: Vec<_> = shell
+            .history()
+            .expect("history")
+            .iter()
+            .map(|item| item.command_line.as_str())
+            .collect();
+        assert_eq!(
+            lines.iter().filter(|line| **line == "old-entry").count(),
+            1,
+            "{lines:?}"
+        );
+        assert_eq!(
+            lines.iter().filter(|line| **line == "new-entry").count(),
+            1,
+            "{lines:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn complete_record_end_waits_for_a_timestamped_command() {
+        assert_eq!(complete_record_end(b"#1700000000\n"), 0);
+        assert_eq!(complete_record_end(b"#1700000000\ncmd\n"), 16);
+        assert_eq!(complete_record_end(b"#1700000000\ncmd\n#1700000001\n"), 16);
+        assert_eq!(complete_record_end(b"cmd\n"), 4);
+        assert_eq!(complete_record_end(b"#1700000000\nonly-one\n#1\n"), 21);
+    }
 
     #[tokio::test]
     async fn append_reads_foreign_entries_before_advancing_the_cursor() -> Result<(), error::Error>
