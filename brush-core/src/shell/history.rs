@@ -749,6 +749,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn share_imports_a_rotated_file_once() -> Result<(), error::Error> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("history");
+        std::fs::write(&path, "old-one\nold-two\n")?;
+
+        let loaded = History::import(std::fs::File::open(&path)?)?;
+        let mut shell = crate::Shell::builder().build().await?;
+        shell.set_env_global(
+            "HISTFILE",
+            ShellVariable::new(path.to_string_lossy().to_string()),
+        )?;
+        shell.history = Some(loaded);
+        shell.remember_history_file_position();
+
+        let replacement = dir.path().join("replacement");
+        std::fs::write(&replacement, "rotated-one\nrotated-two\n")?;
+        std::fs::rename(&replacement, &path)?;
+        shell.read_new_history()?;
+        shell.read_new_history()?;
+
+        let lines: Vec<_> = shell
+            .history()
+            .expect("history")
+            .iter()
+            .map(|item| item.command_line.as_str())
+            .collect();
+        for expected in ["old-one", "old-two", "rotated-one", "rotated-two"] {
+            assert_eq!(
+                lines.iter().filter(|line| **line == expected).count(),
+                1,
+                "{expected} duplicated in {lines:?}"
+            );
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn append_reads_foreign_entries_before_advancing_the_cursor() -> Result<(), error::Error>
     {
         let dir = tempfile::tempdir()?;
