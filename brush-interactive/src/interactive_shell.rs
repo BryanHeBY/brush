@@ -37,6 +37,8 @@ pub struct InteractiveOptions {
     /// own: the embedder must also call [`init_zsh_style_hooks`](crate::init_zsh_style_hooks)
     /// before the shell loads its profile and rc files.
     pub zsh_style_hooks: bool,
+    /// Whether to append each command to the history file as soon as it finishes.
+    pub history_append_immediately: bool,
 }
 
 /// Reads `PROMPT_COMMAND` as bash does: a string is a single command, an indexed array is one
@@ -148,6 +150,15 @@ impl<'a, IB: InputBackend, SE: brush_core::ShellExtensions> InteractiveShell<'a,
                 }
                 InteractiveExecutionResult::Eof => {
                     break Ok(());
+                }
+            }
+
+            // With the zsh-style opt-in, persist what this command added before waiting for the
+            // next one. A failure leaves the items unsaved for the next attempt.
+            if self.options.history_append_immediately {
+                let mut shell = self.shell.lock().await;
+                if let Err(e) = shell.save_history() {
+                    tracing::debug!("couldn't append history: {e}");
                 }
             }
 

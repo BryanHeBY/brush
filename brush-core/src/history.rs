@@ -20,6 +20,10 @@ pub struct History {
     /// finds an item by ID (by binary search) without a separate map from IDs to items.
     items: rpds::VectorSync<Item>,
     next_id: ItemId,
+    /// Index of the oldest unsaved item, if any. Kept so appending a command's item costs the
+    /// unsaved tail rather than a scan of the whole history.
+    #[cfg_attr(feature = "serde", serde(default))]
+    first_dirty: Option<usize>,
 }
 
 impl History {
@@ -104,6 +108,7 @@ impl History {
             .ok_or(error::ErrorKind::HistoryItemNotFound)?;
         // The item keeps its ID, so the items stay in ID order.
         self.items.set_mut(index, Item { id, ..item });
+        self.first_dirty = self.items.iter().position(|item| item.dirty);
         Ok(())
     }
 
@@ -126,6 +131,7 @@ impl History {
         for item in after {
             self.items.push_back_mut(item);
         }
+        self.first_dirty = self.items.iter().position(|item| item.dirty);
 
         true
     }
@@ -150,6 +156,7 @@ impl History {
         for item in kept {
             self.items.push_back_mut(item);
         }
+        self.first_dirty = self.items.iter().position(|item| item.dirty);
     }
 
     /// Discards the oldest entries until at most `limit` remain.
@@ -175,7 +182,12 @@ impl History {
         item.id = id;
         self.next_id += 1;
 
+        let dirty = item.dirty;
         self.items.push_back_mut(item);
+        if dirty {
+            let index = self.items.len() - 1;
+            self.first_dirty = Some(self.first_dirty.map_or(index, |first| first.min(index)));
+        }
 
         Ok(id)
     }
@@ -197,6 +209,7 @@ impl History {
     /// Clears all history items.
     pub fn clear(&mut self) -> Result<(), error::Error> {
         self.items = rpds::VectorSync::new_sync();
+        self.first_dirty = None;
         Ok(())
     }
 
@@ -228,8 +241,19 @@ impl History {
         let mut file =
             std::io::BufWriter::new(file_options.create(true).open(history_file_path.as_ref())?);
 
+        // Nothing to append? Don't walk a long history just to find no unsaved items.
+        if unsaved_items_only && self.first_dirty.is_none() {
+            return Ok(());
+        }
+
+        let start = if unsaved_items_only {
+            self.first_dirty.unwrap_or(0)
+        } else {
+            0
+        };
+
         let mut written = Vec::new();
-        for (index, item) in self.items.iter().enumerate() {
+        for (index, item) in self.items.iter().enumerate().skip(start) {
             if unsaved_items_only && !item.dirty {
                 continue;
             }
@@ -253,6 +277,9 @@ impl History {
             if let Some(item) = self.items.get_mut(index) {
                 item.dirty = false;
             }
+        }
+        if unsaved_items_only {
+            self.first_dirty = None;
         }
 
         Ok(())

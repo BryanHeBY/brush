@@ -8,6 +8,10 @@
       "description": "Experimental features configuration.",
       "$ref": "#/$defs/ExperimentalConfig"
     },
+    "history": {
+      "description": "Command history configuration.",
+      "$ref": "#/$defs/HistoryConfig"
+    },
     "ui": {
       "description": "User interface configuration options.",
       "$ref": "#/$defs/UiConfig"
@@ -28,6 +32,20 @@
         },
         "zsh-hooks": {
           "description": "Enable zsh-style preexec/precmd hooks.",
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "default": null
+        }
+      }
+    },
+    "HistoryConfig": {
+      "description": "Command history configuration.",
+      "type": "object",
+      "properties": {
+        "append-immediately": {
+          "description": "Append each command to the history file as soon as it finishes.",
           "type": [
             "boolean",
             "null"

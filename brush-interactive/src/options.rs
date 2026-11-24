@@ -19,6 +19,9 @@ pub struct UIOptions {
     /// Whether to enable zsh-style hooks.
     #[builder(default)]
     pub zsh_style_hooks: bool,
+    /// Whether to append each command to the history file as soon as it finishes.
+    #[builder(default)]
+    pub history_append_immediately: bool,
 }
 
 impl From<&UIOptions> for crate::InteractiveOptions {
@@ -26,6 +29,7 @@ impl From<&UIOptions> for crate::InteractiveOptions {
         Self {
             terminal_shell_integration: options.terminal_shell_integration,
             zsh_style_hooks: options.zsh_style_hooks,
+            history_append_immediately: options.history_append_immediately,
         }
     }
 }

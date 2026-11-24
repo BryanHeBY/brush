@@ -81,6 +81,11 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
     /// - `ignoreboth`: both of those.
     /// - `erasedups`: first remove any earlier entries the same as it.
     pub fn add_to_history(&mut self, command: &str) -> Result<(), error::Error> {
+        // `set +o history` turns off automatic recording; explicit `history -s` still adds.
+        if !self.options.enable_command_history {
+            return Ok(());
+        }
+
         let controls = if self.options.interactive {
             self.env_str("HISTCONTROL")
                 .map(|value| HistoryControl::parse_list(&value))

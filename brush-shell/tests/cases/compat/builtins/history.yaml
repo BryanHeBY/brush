@@ -610,7 +610,6 @@ cases:
     stdin: ": same\n: same \n : same\n: other\n: same\nhistory\n"
 
   - name: "set +o history stops recording"
-    known_failure: true # brush keeps recording after `set +o history`
     ignore_stderr: true # Ignore job control warnings from interactive shell without a tty
     args: ["-i"]
     env:

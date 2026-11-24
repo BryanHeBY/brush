@@ -15,7 +15,7 @@ use std::os::unix::process::CommandExt as _;
 
 use expectrl::{
     Expect, Session,
-    process::unix::{PtyStream, UnixProcess},
+    process::unix::{PtyStream, Signal, UnixProcess},
     repl::ReplSession,
     stream::log::LogStream,
 };
@@ -559,7 +559,119 @@ fn stop_signal_to_shell_leaves_background_jobs_alone() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Starts a shell with a private `HOME`/`HISTFILE`, optionally using a config file and an
+/// explicit input backend. Unlike the shared helpers, this omits `--no-config` when a config is
+/// given, so history settings can be exercised end to end.
+fn start_history_session(
+    backend: Option<&str>,
+    config: Option<&std::path::Path>,
+    home: &std::path::Path,
+) -> anyhow::Result<RawShellSession> {
+    let shell_path = assert_cmd::cargo::cargo_bin!("brush");
+
+    let mut cmd = std::process::Command::new(shell_path);
+    cmd.args([
+        "--noprofile",
+        "--norc",
+        "--disable-bracketed-paste",
+        "--disable-color",
+    ]);
+    if let Some(config) = config {
+        cmd.arg("--config").arg(config);
+    } else {
+        cmd.arg("--no-config");
+    }
+    if let Some(backend) = backend {
+        cmd.arg(format!("--input-backend={backend}"));
+    }
+    cmd.env("PS1", "hist> ");
+    cmd.env("TERM", "xterm-256color");
+    cmd.env("HOME", home);
+    cmd.env("HISTFILE", home.join("history"));
+
+    let session = expectrl::session::Session::spawn(cmd)?;
+    let session = expectrl::repl::ReplSession::new(session, "hist> ");
+
+    Ok(session)
+}
+
+fn read_history_file(home: &std::path::Path) -> String {
+    std::fs::read_to_string(home.join("history")).unwrap_or_default()
+}
+
+/// With immediate appends enabled, a command is on disk before the shell can be killed without
+/// running its normal exit path.
+#[test]
+fn append_immediately_persists_without_clean_exit() -> anyhow::Result<()> {
+    let home = tempfile::tempdir()?;
+    let config = home.path().join("config.toml");
+    std::fs::write(&config, "[history]\nappend-immediately = true\n")?;
+
+    let mut session = start_history_session(Some("basic"), Some(&config), home.path())?;
+    session.expect_prompt()?;
+    session.send_line("echo persisted")?;
+    session.expect_prompt()?;
+
+    // No `exit`: the session's normal end-of-loop save never runs.
+    session
+        .get_session_mut()
+        .get_process_mut()
+        .kill(Signal::SIGKILL)
+        .context("sending SIGKILL")?;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while session
+        .get_session()
+        .get_process()
+        .is_alive()
+        .unwrap_or(false)
+        && std::time::Instant::now() < deadline
+    {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+
+    let contents = read_history_file(home.path());
+    assert!(
+        contents.contains("echo persisted"),
+        "command was not appended before the session was killed: {contents:?}"
+    );
+
+    Ok(())
+}
+
+/// `set +o history` stops automatic recording; `set -o history` starts it again. Explicit
+/// `history -s` keeps working while it is off.
+#[test]
+fn set_plus_o_history_toggles_recording() -> anyhow::Result<()> {
+    let home = tempfile::tempdir()?;
+    let mut session = start_history_session(Some("basic"), None, home.path())?;
+    session.expect_prompt()?;
+
+    session.send_line(": before")?;
+    session.expect_prompt()?;
+    session.send_line("set +o history")?;
+    session.expect_prompt()?;
+    session.send_line(": hidden")?;
+    session.expect_prompt()?;
+    session.send_line("history -s explicit-entry")?;
+    session.expect_prompt()?;
+    session.send_line("set -o history")?;
+    session.expect_prompt()?;
+    session.send_line(": after")?;
+    session.expect_prompt()?;
+
+    let output = String::from_utf8(session.execute("history")?)?;
+    assert!(output.contains(": before"), "history: {output}");
+    assert!(output.contains(": after"), "history: {output}");
+    assert!(output.contains("explicit-entry"), "history: {output}");
+    assert!(!output.contains(": hidden"), "history: {output}");
+
+    session.exit()?;
+
+    Ok(())
+}
+
 type ShellSession = ReplSession<Session<UnixProcess, LogStream<PtyStream, std::io::Stdout>>>;
+type RawShellSession = ReplSession<Session<UnixProcess, PtyStream>>;
 // N.B. Comment out the above line and uncomment out the following line to disable logging of the
 // session. type ShellSession = ReplSession<Session<UnixProcess, PtyStream>>;
 
@@ -699,7 +811,7 @@ fn start_shell_session_with(
         "--input-backend=basic",
     ]);
     cmd.env("PS1", DEFAULT_PROMPT);
-    cmd.env("TERM", "linux");
+    cmd.env("TERM", "xterm-256color");
     configure(&mut cmd);
 
     let session = expectrl::session::Session::spawn(cmd)?;
