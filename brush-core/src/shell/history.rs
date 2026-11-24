@@ -82,23 +82,20 @@ fn has_unquoted_hash(command: &str) -> bool {
             escaped = false;
             continue;
         }
-        match quote {
-            Some(open) => {
-                if character == '\\' && open == '"' {
-                    escaped = true;
-                } else if character == open {
-                    quote = None;
-                }
+        if let Some(open) = quote {
+            if character == '\\' && open == '"' {
+                escaped = true;
+            } else if character == open {
+                quote = None;
             }
-            None => {
-                if character == '#' {
-                    return true;
-                }
-                if character == '\'' || character == '"' {
-                    quote = Some(character);
-                } else if character == '\\' {
-                    escaped = true;
-                }
+        } else {
+            if character == '#' {
+                return true;
+            }
+            if character == '\'' || character == '"' {
+                quote = Some(character);
+            } else if character == '\\' {
+                escaped = true;
             }
         }
     }
@@ -645,6 +642,11 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::panic_in_result_fn,
+    clippy::expect_used,
+    reason = "assertions and fixture lookups in fallible tests"
+)]
 mod tests {
     use super::*;
     use crate::{history::History, variables::ShellVariable};

@@ -286,7 +286,10 @@ fn matched_prefix_len(candidate: &str, prefix: &str, ignore_case: bool) -> Optio
     // alone is not equivalent: Greek final sigma depends on its position in the word.
     for (index, character) in candidate.char_indices() {
         let boundary = index + character.len_utf8();
-        let lowercase = candidate[..boundary].to_lowercase();
+        let Some(prefix_text) = candidate.get(..boundary) else {
+            continue;
+        };
+        let lowercase = prefix_text.to_lowercase();
         if lowercase.len() >= lowercase_prefix.len() {
             return lowercase.starts_with(&lowercase_prefix).then_some(boundary);
         }

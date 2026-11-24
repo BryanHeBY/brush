@@ -1434,7 +1434,7 @@ mod tests {
         let dir = tempfile::tempdir()?;
         let path = dir.path().join("history");
         std::fs::write(&path, "existing\n")?;
-        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o555))?;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o444))?;
 
         let mut history = History::default();
         history.add(Item::new("retry-me"))?;
@@ -1446,7 +1446,7 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&path)?, "existing\n");
         assert!(history.first_dirty.is_some());
 
-        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755))?;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644))?;
         history.save_with_limit(&path, true, true, false, None)?;
         let contents = std::fs::read_to_string(&path)?;
         assert!(contents.contains("retry-me"), "{contents:?}");
