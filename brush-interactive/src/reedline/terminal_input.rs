@@ -88,7 +88,7 @@ pub(super) fn pause_crossterm_reader() {
     use std::sync::atomic::Ordering;
 
     CROSSTERM_READER_ACTIVE.store(false, Ordering::Release);
-    while !CROSSTERM_READER_IDLE.load(Ordering::Acquire) {
+    while !CROSSTERM_READER_IDLE.load(Ordering::Acquire) && !crate::hangup::requested() {
         std::thread::sleep(std::time::Duration::from_millis(1));
     }
 }
