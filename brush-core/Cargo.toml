@@ -86,6 +86,7 @@ uuid = { version = "1", features = ["js"] }
 
 [dev-dependencies]
 anyhow = "1.0.102"
+serde_json = "1.0.149"
 pretty_assertions = { version = "1.4.1", features = ["unstable"] }
 tempfile = "3.27.0"
 tokio = { version = "1.52.3", features = ["time"] }

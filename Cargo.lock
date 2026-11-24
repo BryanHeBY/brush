@@ -455,6 +455,7 @@ dependencies = [
  "rand 0.10.4",
  "rpds",
  "serde",
+ "serde_json",
  "strum",
  "strum_macros",
  "tempfile",

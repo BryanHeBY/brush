@@ -46,48 +46,75 @@ impl History {
         let read_time = ItemTimestamp::now();
 
         let buf_reader = std::io::BufReader::new(reader);
-
-        let mut next_timestamp = None;
+        let mut lines = Vec::new();
         for line_result in buf_reader.lines() {
-            let line = match line_result {
-                Ok(line) => line,
+            match line_result {
+                Ok(line) => lines.push(line),
                 // If we couldn't decode the line due to invalid data (perhaps it wasn't
                 // valid UTF8?), skip it and make a best-effort attempt to proceed on.
                 // We'll later warn the user.
                 Err(err) if err.kind() == std::io::ErrorKind::InvalidData => {
                     tracing::warn!("unreadable history line; {err}");
-                    continue;
                 }
                 // In the event of other kinds of errors, return an error result. We don't
                 // want to get stuck in a failing I/O loop.
-                Err(err) => {
-                    return Err(err.into());
-                }
-            };
-
-            // A `#<digits>` line is a timestamp for the entry that follows. Other lines that
-            // start with `#` are commands (as in bash, a command that itself looks like a
-            // timestamp is ambiguous and is treated as one).
-            if let Some(comment) = line.strip_prefix("#")
-                && let Ok(seconds_since_epoch) = comment.trim().parse()
-            {
-                next_timestamp = ItemTimestamp::from_unix_seconds(seconds_since_epoch);
-                continue;
+                Err(err) => return Err(err.into()),
             }
+        }
 
-            let item = Item {
-                id: history.next_id,
-                command_line: line,
-                timestamp: Some(next_timestamp.take().unwrap_or(read_time)),
-                dirty: false,
-            };
+        let is_timestamp = |line: &str| {
+            line.strip_prefix('#')
+                .is_some_and(|rest| rest.trim().parse::<i64>().is_ok())
+        };
+        let timed = lines.iter().any(|line| is_timestamp(line));
 
-            history.add(item)?;
+        if timed {
+            // A timestamped entry runs until the next timestamp; this is how a `lithist`
+            // command with embedded newlines is stored.
+            let mut current: Option<(Option<ItemTimestamp>, Vec<String>)> = None;
+            for line in lines {
+                if is_timestamp(&line) {
+                    if let Some((timestamp, mut command_lines)) = current.take() {
+                        add_imported(&mut history, timestamp, &mut command_lines, read_time)?;
+                    }
+                    let seconds = line
+                        .strip_prefix('#')
+                        .and_then(|rest| rest.trim().parse::<i64>().ok())
+                        .unwrap_or_default();
+                    current = Some((ItemTimestamp::from_unix_seconds(seconds), Vec::new()));
+                } else if let Some((_timestamp, command_lines)) = &mut current {
+                    command_lines.push(line);
+                } else {
+                    current = Some((None, vec![line]));
+                }
+            }
+            if let Some((timestamp, mut command_lines)) = current {
+                add_imported(&mut history, timestamp, &mut command_lines, read_time)?;
+            }
+        } else {
+            let mut next_timestamp = None;
+            for line in lines {
+                if is_timestamp(&line) {
+                    // An untimed file's `#<digits>` line is still a timestamp for the next
+                    // line, exactly as bash's reader treats it.
+                    let seconds = line
+                        .strip_prefix('#')
+                        .and_then(|rest| rest.trim().parse::<i64>().ok())
+                        .unwrap_or_default();
+                    next_timestamp = ItemTimestamp::from_unix_seconds(seconds);
+                    continue;
+                }
+                history.add(Item {
+                    id: history.next_id,
+                    command_line: line,
+                    timestamp: Some(next_timestamp.take().unwrap_or(read_time)),
+                    dirty: false,
+                })?;
+            }
         }
 
         Ok(history)
     }
-
     /// Appends the entries from `reader` to this history, preserving their timestamps. Imported
     /// entries are already on disk, so they are not marked for saving again.
     pub fn append_from(&mut self, reader: impl Read) -> Result<(), error::Error> {
@@ -235,6 +262,14 @@ impl History {
         self.base
     }
 
+    /// Returns the first dirty index, repairing it if an older serialized state omitted it.
+    fn ensure_dirty_index(&mut self) -> Option<usize> {
+        if self.first_dirty.is_none() {
+            self.first_dirty = self.items.iter().position(|item| item.dirty);
+        }
+        self.first_dirty
+    }
+
     /// Flushes the history to backing storage (if relevant).
     ///
     /// # Arguments
@@ -265,13 +300,16 @@ impl History {
         let mut file =
             std::io::BufWriter::new(file_options.create(true).open(history_file_path.as_ref())?);
 
+        let first_dirty = unsaved_items_only
+            .then(|| self.ensure_dirty_index())
+            .flatten();
         // Nothing to append? Don't walk a long history just to find no unsaved items.
-        if unsaved_items_only && self.first_dirty.is_none() {
+        if unsaved_items_only && first_dirty.is_none() {
             return Ok(());
         }
 
         let start = if unsaved_items_only {
-            self.first_dirty.unwrap_or(0)
+            first_dirty.unwrap_or(0)
         } else {
             0
         };
@@ -327,7 +365,10 @@ impl History {
         let path = history_file_path.as_ref();
         let _lock = lock_history_file(path)?;
 
-        if append && unsaved_items_only && self.first_dirty.is_none() && max_items.is_none() {
+        let first_dirty = unsaved_items_only
+            .then(|| self.ensure_dirty_index())
+            .flatten();
+        if append && unsaved_items_only && first_dirty.is_none() && max_items.is_none() {
             return Ok(());
         }
 
@@ -337,7 +378,7 @@ impl History {
             String::new()
         };
         let start = if unsaved_items_only {
-            self.first_dirty.unwrap_or(0)
+            first_dirty.unwrap_or(0)
         } else {
             0
         };
@@ -830,6 +871,27 @@ impl<'a> Iterator for Search<'a> {
     }
 }
 
+/// Adds one imported entry, joining any embedded command lines.
+fn add_imported(
+    history: &mut History,
+    timestamp: Option<ItemTimestamp>,
+    command_lines: &mut Vec<String>,
+    read_time: ItemTimestamp,
+) -> Result<(), error::Error> {
+    if command_lines.is_empty() {
+        return Ok(());
+    }
+    let command_line = command_lines.join("\n");
+    command_lines.clear();
+    history.add(Item {
+        id: history.next_id,
+        command_line,
+        timestamp: Some(timestamp.unwrap_or(read_time)),
+        dirty: false,
+    })?;
+    Ok(())
+}
+
 /// Keeps the last `max_items` entries in a history file's contents.
 ///
 /// With timestamps, a `#<digits>` line starts an entry and the lines after it belong to that
@@ -887,6 +949,7 @@ fn lock_history_file(path: &Path) -> Result<crate::sys::fs::HistoryFileLock, err
         std::env::temp_dir().join(format!("brush-history-{:016x}.lock", hasher.finish()));
     let file = std::fs::OpenOptions::new()
         .create(true)
+        .truncate(false)
         .write(true)
         .open(lock_path)?;
     Ok(crate::sys::fs::lock_history_file(file)?)
@@ -1152,6 +1215,46 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "serde")]
+    #[test]
+    fn old_serialized_state_saves_its_dirty_entries() -> Result<(), error::Error> {
+        let mut history = History::default();
+        history.add(Item::new("from-old-state"))?;
+
+        let mut value = serde_json::to_value(&history).map_err(std::io::Error::other)?;
+        value
+            .as_object_mut()
+            .ok_or_else(|| std::io::Error::other("history serializes as an object"))?
+            .remove("first_dirty");
+        let mut restored: History = serde_json::from_value(value).map_err(std::io::Error::other)?;
+        assert!(restored.first_dirty.is_none());
+        assert!(restored.items.iter().any(|item| item.dirty));
+
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("history");
+        restored.save_with_limit(&path, true, true, false, None)?;
+        assert_eq!(std::fs::read_to_string(&path)?, "from-old-state\n");
+
+        // Saving again must not duplicate the recovered item, and a new item must be added.
+        restored.save_with_limit(&path, true, true, false, None)?;
+        assert_eq!(std::fs::read_to_string(&path)?, "from-old-state\n");
+        restored.add(Item::new("new-after-restore"))?;
+        restored.save_with_limit(&path, true, true, false, None)?;
+        let contents = std::fs::read_to_string(&path)?;
+        assert_eq!(
+            contents.matches("from-old-state").count(),
+            1,
+            "{contents:?}"
+        );
+        assert_eq!(
+            contents.matches("new-after-restore").count(),
+            1,
+            "{contents:?}"
+        );
+
+        Ok(())
+    }
+
     #[test]
     fn save_with_limit_keeps_every_concurrent_append() -> Result<(), error::Error> {
         let dir = tempfile::tempdir()?;
@@ -1172,7 +1275,9 @@ mod tests {
 
         barrier.wait();
         for thread in threads {
-            thread.join().expect("writer thread panicked")?;
+            thread
+                .join()
+                .map_err(|_| std::io::Error::other("writer thread panicked"))??;
         }
 
         let contents = std::fs::read_to_string(&path)?;
@@ -1356,14 +1461,40 @@ mod tests {
     /// several; a comment that isn't one clears it), skips unreadable lines, and leaves the
     /// items saved and numbered from 0.
     #[test]
+    fn import_groups_timestamped_multiline_entries() -> Result<(), error::Error> {
+        let file = b"#1700000000\nfor x in 1; do\n echo inside-$x\ndone\n#1700000001\necho next\n";
+        let history = History::import(&file[..])?;
+        let items: Vec<_> = history.iter().collect();
+
+        assert_eq!(items.len(), 2);
+        assert_eq!(
+            items[0].command_line,
+            "for x in 1; do\n echo inside-$x\ndone"
+        );
+        assert_eq!(
+            items[0].timestamp,
+            ItemTimestamp::from_unix_seconds(1_700_000_000)
+        );
+        assert_eq!(items[1].command_line, "echo next");
+
+        // Without timestamps there is no way to know entry boundaries; each line is its own
+        // entry, as bash reads such a file.
+        let untimed = History::import(&b"for x in 1; do\n echo inside\ndone\n"[..])?;
+        assert_eq!(
+            command_lines(untimed.iter()),
+            ["for x in 1; do", " echo inside", "done"]
+        );
+        Ok(())
+    }
+
+    #[test]
     fn import_reads_history_files() -> Result<(), error::Error> {
-        let before = ItemTimestamp::now();
         let file = b"#1700000000\na\n#1700000005\n#not a time\nb\n#1700000001\n#1700000002\nc\n\xff\xfe\nd\n";
         let mut history = History::import(&file[..])?;
 
         assert_eq!(
             command_lines(history.iter()),
-            ["a", "#not a time", "b", "c", "d"]
+            ["a", "#not a time\nb", "c\nd"]
         );
         let timestamps: Vec<_> = history.iter().map(|item| item.timestamp).collect();
         assert_eq!(
@@ -1374,18 +1505,16 @@ mod tests {
             timestamps[1],
             ItemTimestamp::from_unix_seconds(1_700_000_005)
         );
-        assert!(timestamps[2].is_some_and(|ts| ts >= before));
         assert_eq!(
-            timestamps[3],
+            timestamps[2],
             ItemTimestamp::from_unix_seconds(1_700_000_002)
         );
-        assert!(timestamps[4].is_some_and(|ts| ts >= before));
         assert!(history.iter().all(|item| !item.dirty));
         assert_eq!(
             history.iter().map(|item| item.id).collect::<Vec<_>>(),
-            [0, 1, 2, 3, 4]
+            [0, 1, 2]
         );
-        assert_eq!(history.add(Item::new("e"))?, 5);
+        assert_eq!(history.add(Item::new("e"))?, 3);
 
         assert!(History::import(&b""[..])?.is_empty());
 
@@ -1406,13 +1535,13 @@ mod tests {
             ..Item::new("a")
         })?;
         history.add(Item {
-            timestamp: None,
+            timestamp: ItemTimestamp::from_unix_seconds(1_700_000_001),
             ..Item::new("b")
         })?;
         history.flush(&path, true, true, true)?;
         assert_eq!(
             std::fs::read_to_string(&path)?,
-            "existing\n#1700000000\na\nb\n"
+            "existing\n#1700000000\na\n#1700000001\nb\n"
         );
 
         let reread = History::import(std::fs::File::open(&path)?)?;
@@ -1499,13 +1628,10 @@ mod tests {
     #[test]
     fn import_stamps_entries_without_timestamps() -> Result<(), error::Error> {
         let before = ItemTimestamp::now();
-        let history = History::import(&b"#1700000000\nls\necho hi\n"[..])?;
+        let history = History::import(&b"ls\necho hi\n"[..])?;
 
         let timestamps: Vec<_> = history.iter().map(|item| item.timestamp).collect();
-        assert_eq!(
-            timestamps[0],
-            ItemTimestamp::from_unix_seconds(1_700_000_000)
-        );
+        assert!(timestamps[0].is_some_and(|ts| ts >= before));
         assert!(timestamps[1].is_some_and(|ts| ts >= before));
 
         Ok(())
