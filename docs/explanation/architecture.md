@@ -16,6 +16,7 @@ the answer should follow from here. If it doesn't, this document needs updating.
 | `brush-experimental-builtins` | yes | Builtins not ready to be standard. |
 | `brush-coreutils-builtins` | yes | Optional builtins wrapping [uutils/coreutils](https://github.com/uutils/coreutils); doesn't depend on the other crates. |
 | `brush-interactive` | yes | The interactive front end: reads input, edits the line (with reedline or a basic line reader), and presents prompts, completions, suggestions, and highlighting. |
+| `brush-reedline` | separately | The in-tree Reedline fork used by `brush-interactive`. It keeps the library crate name `reedline`, is excluded from the workspace, and must be published before `brush-interactive` when releasing. |
 | `brush-shell` | yes | The `brush` binary: its command line, and the wiring of the crates above into a shell. |
 | `brush` | yes | A thin wrapper binary around `brush-shell`. |
 | `brush-test-harness` | no | Runs the YAML test cases that compare brush with bash. |
@@ -58,6 +59,10 @@ without its front end. Keep that in mind when deciding what to export.
   (`Builtin`), and is registered by type (`Registration::of`). Builtins that parse
   with clap implement `ParseArgs` through `brush-clap-adapter`, and those that parse
   with winnow-args through `brush-winnow-args-adapter`.
+- History is split by responsibility: `History` owns entries, numbering, search, and the
+  in-memory limit; the private `history_file` module owns the on-disk format (timestamps and
+  complete-record boundaries), file identity, the incremental read cursor, locking, and atomic
+  writes; `Shell` interprets `HIST*` and `shopt` settings and coordinates the two.
 - A shell keeps its builtins' registrations, by name, in a `builtins::Registry`
   (`Shell::builtins`, `Shell::builtins_mut`), which is the one way to look them up,
   register them, or enable and disable them. How it stores them is private, so

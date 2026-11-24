@@ -6,7 +6,10 @@ use std::{
     path::Path,
 };
 
-use crate::error;
+use crate::{
+    error,
+    history_file::{atomic_write, lock_history_file, trim_history_entries},
+};
 
 /// Represents a unique identifier for a history item.
 type ItemId = i64;
@@ -989,161 +992,11 @@ fn add_imported(
     Ok(())
 }
 
-/// Keeps the last `max_items` entries in a history file's contents.
-///
-/// With timestamps, a `#<digits>` line starts an entry and the lines after it belong to that
-/// entry (a multi-line command); without them, each line is an entry, as bash reads an untimed
-/// file.
-fn trim_history_entries(contents: &str, max_items: usize) -> String {
-    let lines: Vec<&str> = contents.lines().collect();
-    let timed = lines.iter().any(|line| {
-        line.strip_prefix('#')
-            .is_some_and(|rest| rest.trim().parse::<i64>().is_ok())
-    });
-    let mut entries: Vec<Vec<&str>> = Vec::new();
-    if timed {
-        for line in lines {
-            let is_timestamp = line
-                .strip_prefix('#')
-                .is_some_and(|rest| rest.trim().parse::<i64>().is_ok());
-            if is_timestamp || entries.is_empty() {
-                entries.push(vec![line]);
-            } else if let Some(entry) = entries.last_mut() {
-                entry.push(line);
-            }
-        }
-    } else {
-        entries.extend(lines.into_iter().map(|line| vec![line]));
-    }
-
-    if entries.len() <= max_items {
-        return contents.to_owned();
-    }
-    if max_items == 0 {
-        return String::new();
-    }
-
-    let mut trimmed = entries[entries.len() - max_items..]
-        .iter()
-        .flatten()
-        .copied()
-        .collect::<Vec<_>>()
-        .join("\n");
-    trimmed.push('\n');
-    trimmed
-}
-
-/// Locks a per-history-file lock used to serialize writers to `path`.
-///
-/// The lock lives in the temporary directory rather than next to the history file so it does
-/// not become another file in the user's home (or in tests that compare history directories).
-pub(crate) fn lock_history_file(
-    path: &Path,
-) -> Result<crate::sys::fs::HistoryFileLock, error::Error> {
-    let lock_path = history_lock_path(path);
-    let file = std::fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .write(true)
-        .open(lock_path)?;
-    Ok(crate::sys::fs::lock_history_file(file)?)
-}
-
-/// Returns the lock file path for a history path, resolving symlinks so every spelling of the
-/// same file uses the same lock.
-pub(crate) fn history_lock_path(path: &Path) -> std::path::PathBuf {
-    use std::hash::{Hash as _, Hasher as _};
-
-    let lock_identity = path.canonicalize().unwrap_or_else(|_| {
-        let absolute = if path.is_absolute() {
-            path.to_path_buf()
-        } else {
-            std::env::current_dir().map_or_else(|_| path.to_path_buf(), |cwd| cwd.join(path))
-        };
-        let Some(file_name) = absolute.file_name() else {
-            return absolute;
-        };
-        let parent = absolute
-            .parent()
-            .and_then(|parent| parent.canonicalize().ok())
-            .unwrap_or_else(|| {
-                absolute
-                    .parent()
-                    .map_or_else(|| Path::new("").to_path_buf(), Path::to_path_buf)
-            });
-        parent.join(file_name)
-    });
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    lock_identity.hash(&mut hasher);
-    #[cfg(unix)]
-    let lock_directory = Path::new("/tmp");
-    #[cfg(not(unix))]
-    let lock_directory = std::env::temp_dir();
-    lock_directory.join(format!("brush-history-{:016x}.lock", hasher.finish()))
-}
-
-/// Writes `contents` to a temporary file next to the target, then renames it into place.
-///
-/// A symlinked history file is resolved and its target is replaced, leaving the link in
-/// place. The target's existing permissions are copied to the replacement, so a private
-/// history file does not become world-readable after a rewrite.
-fn atomic_write(path: &Path, contents: &[u8]) -> Result<(), error::Error> {
-    let target = match std::fs::symlink_metadata(path) {
-        Ok(metadata) if metadata.file_type().is_symlink() => std::fs::canonicalize(path)?,
-        _ => path.to_path_buf(),
-    };
-    let permissions = std::fs::metadata(&target)
-        .ok()
-        .map(|metadata| metadata.permissions());
-
-    let file_name = target.file_name().ok_or_else(|| {
-        std::io::Error::new(std::io::ErrorKind::InvalidInput, "invalid history file")
-    })?;
-
-    let mut created = None;
-    for attempt in 0..100_u32 {
-        let mut temp_name = std::ffi::OsString::from(".");
-        temp_name.push(file_name);
-        temp_name.push(format!(".tmp.{}.{attempt}", std::process::id()));
-        let candidate = target.with_file_name(temp_name);
-        match crate::sys::fs::create_new_private_file(&candidate) {
-            Ok(file) => {
-                created = Some((file, candidate));
-                break;
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-            Err(error) => return Err(error.into()),
-        }
-    }
-    let Some((mut file, temp_path)) = created else {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::AlreadyExists,
-            "could not create a private history temporary file",
-        )
-        .into());
-    };
-
-    let result = (|| -> Result<(), error::Error> {
-        file.write_all(contents)?;
-        if let Some(permissions) = permissions {
-            std::fs::set_permissions(&temp_path, permissions)?;
-        }
-        file.sync_all()?;
-        drop(file);
-        std::fs::rename(&temp_path, &target)?;
-        Ok(())
-    })();
-    if result.is_err() {
-        // Only this operation's exclusively-created temporary is removed.
-        let _ = std::fs::remove_file(&temp_path);
-    }
-    result
-}
-
 #[cfg(test)]
 #[allow(clippy::panic_in_result_fn, reason = "assertions in a fallible test")]
 mod tests {
     use super::*;
+    use crate::history_file::lock_path as history_lock_path;
 
     fn history(lines: &[&str]) -> Result<History, error::Error> {
         let mut history = History::default();

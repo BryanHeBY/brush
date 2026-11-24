@@ -6,7 +6,15 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use crate::{error, history::HistoryControl, openfiles, patterns};
+use crate::{
+    error,
+    history::HistoryControl,
+    history_file::{
+        OwnAppend, ReadPosition, complete_record_end, file_identity, lock_history_file,
+        tail_checksum,
+    },
+    openfiles, patterns,
+};
 
 /// Joins the lines of a multi-line command the way bash's `cmdhist` does.
 ///
@@ -155,16 +163,6 @@ fn has_quoted_newline(command: &str) -> bool {
 
 /// A cheap checksum of the last (up to) 256 bytes of `bytes`, used to notice that a file's
 /// prefix was replaced in place even when its size and inode did not change.
-fn tail_checksum(bytes: &[u8]) -> u64 {
-    let start = bytes.len().saturating_sub(256);
-    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
-    for byte in &bytes[start..] {
-        hash ^= u64::from(*byte);
-        hash = hash.wrapping_mul(0x100_0000_01b3);
-    }
-    hash
-}
-
 /// Splits `HISTIGNORE` on unescaped colons, removing the backslash that escapes a colon.
 fn split_ignore_patterns(ignore: &str) -> Vec<String> {
     let mut patterns = Vec::new();
@@ -189,62 +187,6 @@ fn split_ignore_patterns(ignore: &str) -> Vec<String> {
     }
     patterns.push(current);
     patterns
-}
-
-/// Returns the end of the last complete history record in `bytes`.
-///
-/// A newline normally completes a record, but in a timestamped file a timestamp without a
-/// following command is only half a record. Leave that timestamp for the next read rather than
-/// committing the cursor past it.
-fn complete_record_end(bytes: &[u8]) -> usize {
-    let Some(last_newline) = bytes.iter().rposition(|byte| *byte == b'\n') else {
-        return 0;
-    };
-    let end = last_newline + 1;
-    let lines: Vec<&[u8]> = bytes[..last_newline].split(|byte| *byte == b'\n').collect();
-    let is_timestamp = |line: &[u8]| {
-        line.strip_prefix(b"#")
-            .and_then(|rest| std::str::from_utf8(rest).ok())
-            .is_some_and(|rest| rest.trim().parse::<i64>().is_ok())
-    };
-    if !lines.iter().any(|line| is_timestamp(line)) {
-        return end;
-    }
-
-    let mut offset = 0;
-    let mut trailing_timestamp = None;
-    let mut has_command = false;
-    for line in lines {
-        if is_timestamp(line) {
-            if has_command || trailing_timestamp.is_none() {
-                trailing_timestamp = Some(offset);
-                has_command = false;
-            }
-        } else {
-            has_command = true;
-        }
-        offset += line.len() + 1;
-    }
-
-    if trailing_timestamp.is_some() && !has_command {
-        trailing_timestamp.unwrap_or(end)
-    } else {
-        end
-    }
-}
-
-/// Returns the identity used to detect a replaced history file.
-fn history_file_identity(metadata: &std::fs::Metadata) -> super::HistoryFileId {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt as _;
-        (metadata.dev(), metadata.ino())
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = metadata;
-        ()
-    }
 }
 
 impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
@@ -382,20 +324,18 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
 
         let mut file = std::fs::File::open(&path)?;
         let metadata = file.metadata()?;
-        let file_id = Some(history_file_identity(&metadata));
+        let file_id = Some(file_identity(&metadata));
         let length = metadata.len();
 
         let stored = if new_only {
-            self.history_read_position.clone()
+            self.history_file_state.read_position.clone()
         } else {
             None
         };
-        let candidate = stored
-            .as_ref()
-            .and_then(|(stored_path, position, stored_id, _)| {
-                (stored_path == &path && *position <= length && stored_id == &file_id)
-                    .then_some(*position)
-            });
+        let candidate = stored.as_ref().and_then(|position| {
+            (position.path == path && position.offset <= length && position.identity == file_id)
+                .then_some(position.offset)
+        });
 
         let read_from = candidate.map_or(0, |position| position.saturating_sub(256));
         let mut bytes = Vec::new();
@@ -407,7 +347,7 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
         if offset > 0
             && stored
                 .as_ref()
-                .is_some_and(|(_, _, _, checksum)| tail_checksum(&bytes[..prefix_len]) != *checksum)
+                .is_some_and(|position| tail_checksum(&bytes[..prefix_len]) != position.checksum)
         {
             offset = 0;
             prefix_len = 0;
@@ -419,26 +359,24 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
         let new_bytes = &bytes[prefix_len..];
         let complete_end = complete_record_end(new_bytes);
         if complete_end == 0 {
-            self.history_read_position = Some((
+            self.history_file_state.read_position = Some(ReadPosition {
                 path,
-                offset as u64,
-                file_id,
-                tail_checksum(&bytes[..prefix_len]),
-            ));
+                offset: offset as u64,
+                identity: file_id,
+                checksum: tail_checksum(&bytes[..prefix_len]),
+            });
             return Ok(());
         }
 
         let cursor_reset = new_only
-            && stored
-                .as_ref()
-                .is_some_and(|(stored_path, position, _, _)| {
-                    stored_path == &path && *position > 0 && offset == 0
-                });
+            && stored.as_ref().is_some_and(|position| {
+                position.path == path && position.offset > 0 && offset == 0
+            });
         let size_limit = self.history_size_limit();
         let Some(history) = &mut self.history else {
             return Err(error::ErrorKind::HistoryNotEnabled.into());
         };
-        let mut own_appends = std::mem::take(&mut self.history_own_appends);
+        let mut own_appends = std::mem::take(&mut self.history_file_state.own_appends);
         let filter_own = new_only;
         let imported: Vec<_> = if cursor_reset {
             let imported = crate::history::History::import(&bytes[..complete_end])?;
@@ -478,8 +416,8 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
         for item in imported {
             let own_index = filter_own
                 .then(|| {
-                    own_appends.iter().position(|(own_path, own)| {
-                        own_path == &path && own.command_line == item.command_line
+                    own_appends.iter().position(|own| {
+                        own.path == path && own.item.command_line == item.command_line
                     })
                 })
                 .flatten();
@@ -495,13 +433,13 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
         if let Some(limit) = size_limit {
             history.retain_last_preserving_retry(limit);
         }
-        self.history_own_appends = own_appends;
-        self.history_read_position = Some((
+        self.history_file_state.own_appends = own_appends;
+        self.history_file_state.read_position = Some(ReadPosition {
             path,
-            (offset + complete_end) as u64,
-            file_id,
-            tail_checksum(&bytes[..prefix_len + complete_end]),
-        ));
+            offset: (offset + complete_end) as u64,
+            identity: file_id,
+            checksum: tail_checksum(&bytes[..prefix_len + complete_end]),
+        });
 
         Ok(())
     }
@@ -515,17 +453,17 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
         let Ok(metadata) = std::fs::metadata(&path) else {
             return;
         };
-        let file_id = Some(history_file_identity(&metadata));
+        let file_id = Some(file_identity(&metadata));
         let Ok(bytes) = std::fs::read(&path) else {
             return;
         };
         let complete_end = complete_record_end(&bytes);
-        self.history_read_position = Some((
+        self.history_file_state.read_position = Some(ReadPosition {
             path,
-            complete_end as u64,
-            file_id,
-            tail_checksum(&bytes[..complete_end]),
-        ));
+            offset: complete_end as u64,
+            identity: file_id,
+            checksum: tail_checksum(&bytes[..complete_end]),
+        });
     }
 
     /// Records that the complete history file was just written through `offset`.
@@ -536,7 +474,7 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
         let Ok(metadata) = std::fs::metadata(&path) else {
             return;
         };
-        let file_id = Some(history_file_identity(&metadata));
+        let file_id = Some(file_identity(&metadata));
         let offset = metadata.len();
         let checksum = (|| {
             let mut file = std::fs::File::open(&path)?;
@@ -546,7 +484,12 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
             Ok::<_, std::io::Error>(tail_checksum(&tail))
         })()
         .unwrap_or_default();
-        self.history_read_position = Some((path, offset, file_id, checksum));
+        self.history_file_state.read_position = Some(ReadPosition {
+            path,
+            offset,
+            identity: file_id,
+            checksum,
+        });
     }
 
     /// Reads entries other sessions appended to the shell's history file since this session last
@@ -573,7 +516,7 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
         };
         let write_timestamps = self.env.is_set("HISTTIMEFORMAT");
 
-        let _lock = match crate::history::lock_history_file(history_file_path.as_path()) {
+        let _lock = match lock_history_file(history_file_path.as_path()) {
             Ok(lock) => lock,
             Err(error) => {
                 if let Some(history) = &mut self.history {
@@ -599,11 +542,12 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
                 history.retain_last(limit);
             }
         }
-        self.history_own_appends.extend(
-            appended
-                .into_iter()
-                .map(|item| (history_file_path.clone(), item)),
-        );
+        self.history_file_state
+            .own_appends
+            .extend(appended.into_iter().map(|item| OwnAppend {
+                path: history_file_path.clone(),
+                item,
+            }));
 
         Ok(())
     }
@@ -619,7 +563,7 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
         };
         let write_timestamps = self.env.is_set("HISTTIMEFORMAT");
 
-        let _lock = match crate::history::lock_history_file(history_file_path.as_path()) {
+        let _lock = match lock_history_file(history_file_path.as_path()) {
             Ok(lock) => lock,
             Err(error) => {
                 if let Some(history) = &mut self.history {
@@ -976,7 +920,7 @@ mod tests {
         let dir = tempfile::tempdir()?;
         let path = dir.path().join("history");
         std::fs::write(&path, "")?;
-        let lock_path = crate::history::history_lock_path(&path);
+        let lock_path = crate::history_file::lock_path(&path);
         std::fs::create_dir_all(&lock_path)?;
 
         let mut shell = crate::Shell::builder().build().await?;

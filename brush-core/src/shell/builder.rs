@@ -282,8 +282,7 @@ impl<SE: extensions::ShellExtensions> Default for Shell<SE> {
             parser_impl: crate::parser::ParserImpl::default(),
             key_bindings: None,
             history: None,
-            history_read_position: None,
-            history_own_appends: Vec::new(),
+            history_file_state: crate::history_file::State::default(),
         }
     }
 }
