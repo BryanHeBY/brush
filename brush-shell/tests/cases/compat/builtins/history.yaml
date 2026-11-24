@@ -623,7 +623,6 @@ cases:
       history
 
   - name: "HISTIGNORE"
-    known_failure: true # brush doesn't implement HISTIGNORE
     ignore_stderr: true # Ignore job control warnings from interactive shell without a tty
     args: ["-i"]
     env:
@@ -636,6 +635,62 @@ cases:
       echo skip
       : b
       history
+
+  - name: "HISTSIZE caps the in-memory list"
+    ignore_stderr: true # Ignore job control warnings from interactive shell without a tty
+    args: ["-i"]
+    env:
+      HISTFILE: "history-file.txt"
+      HISTSIZE: "2"
+    stdin: |
+      : a
+      : b
+      : c
+      history
+
+  - name: "HISTFILESIZE caps the saved file"
+    ignore_stderr: true # Ignore job control warnings from interactive shell without a tty
+    args: ["-i"]
+    env:
+      HISTFILE: "history-file.txt"
+      HISTSIZE: "10"
+      HISTFILESIZE: "2"
+    stdin: |
+      : a
+      : b
+      : c
+
+  - name: "histappend off rewrites the file"
+    ignore_stderr: true # Ignore job control warnings from interactive shell without a tty
+    args: ["-i"]
+    env:
+      HISTFILE: "history-file.txt"
+      HISTSIZE: "10"
+      HISTFILESIZE: "10"
+    test_files:
+      - path: "history-file.txt"
+        contents: |
+          old1
+          old2
+    stdin: |
+      shopt -u histappend
+      : new
+
+  - name: "histappend on appends to the file"
+    ignore_stderr: true # Ignore job control warnings from interactive shell without a tty
+    args: ["-i"]
+    env:
+      HISTFILE: "history-file.txt"
+      HISTSIZE: "10"
+      HISTFILESIZE: "10"
+    test_files:
+      - path: "history-file.txt"
+        contents: |
+          old1
+          old2
+    stdin: |
+      shopt -s histappend
+      : new
 
   - name: "cmdhist saves a multi-line command as one line"
     known_failure: true # brush saves the command's newlines as typed

@@ -24,6 +24,10 @@ pub struct History {
     /// unsaved tail rather than a scan of the whole history.
     #[cfg_attr(feature = "serde", serde(default))]
     first_dirty: Option<usize>,
+    /// Number of oldest entries forgotten, so displayed history numbers keep counting up as
+    /// they do in bash after `HISTSIZE` drops an entry.
+    #[cfg_attr(feature = "serde", serde(default))]
+    base: usize,
 }
 
 impl History {
@@ -161,13 +165,15 @@ impl History {
 
     /// Discards the oldest entries until at most `limit` remain.
     pub fn retain_last(&mut self, limit: usize) {
-        let mut remove = self.count().saturating_sub(limit);
+        let removed = self.count().saturating_sub(limit);
+        let mut remove = removed;
         if remove != 0 {
             self.retain(|_| {
                 let keep = remove == 0;
                 remove = remove.saturating_sub(1);
                 keep
             });
+            self.base += removed;
         }
     }
 
@@ -210,7 +216,14 @@ impl History {
     pub fn clear(&mut self) -> Result<(), error::Error> {
         self.items = rpds::VectorSync::new_sync();
         self.first_dirty = None;
+        self.base = 0;
         Ok(())
+    }
+
+    /// Returns the number of items forgotten from the front of the history. Displayed numbers
+    /// are this plus the item's position plus one.
+    pub const fn base(&self) -> usize {
+        self.base
     }
 
     /// Flushes the history to backing storage (if relevant).
@@ -282,6 +295,33 @@ impl History {
             self.first_dirty = None;
         }
 
+        Ok(())
+    }
+
+    /// Trims the backing file to its last `max_items` lines.
+    ///
+    /// `HISTFILESIZE` counts entries, but a history file can also contain timestamp lines; a
+    /// later format pass will group them. Until then this keeps the last lines, which matches
+    /// bash for files without timestamps and never drops the newest entries.
+    pub fn truncate_file(
+        &self,
+        history_file_path: impl AsRef<Path>,
+        max_items: usize,
+    ) -> Result<(), error::Error> {
+        let path = history_file_path.as_ref();
+        let Ok(contents) = std::fs::read_to_string(path) else {
+            return Ok(());
+        };
+        let lines: Vec<&str> = contents.lines().collect();
+        if lines.len() <= max_items {
+            return Ok(());
+        }
+
+        let mut trimmed = lines[lines.len() - max_items..].join("\n");
+        if !trimmed.is_empty() {
+            trimmed.push('\n');
+        }
+        std::fs::write(path, trimmed)?;
         Ok(())
     }
 

@@ -218,7 +218,7 @@ fn display_history(
         std::writeln!(
             stdout,
             "{:>5}  {formatted_timestamp}{}",
-            skip_count + i + 1,
+            history.base() + skip_count + i + 1,
             item.command_line
         )?;
     }

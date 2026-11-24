@@ -260,6 +260,9 @@ impl RuntimeOptions {
             options.enable_bang_style_history_substitution = true;
             options.emacs_mode = !create_options.no_editing;
             options.expand_aliases = true;
+            // Brush appends to the history file by default; `shopt -u histappend` selects
+            // bash's overwrite-on-exit behavior.
+            options.append_to_history_file = true;
         }
 
         // Update any options.

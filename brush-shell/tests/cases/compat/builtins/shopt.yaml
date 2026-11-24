@@ -12,7 +12,9 @@ cases:
     min_oracle_version: 5.3 # Options changed in bash 5.3
     incompatible_os: ["fedora", "azurelinux"] # Fedora enables "syslog-history" option
     pty: true
-    args: ["-i", "-c", "shopt | sort | grep -v extglob"]
+    # brush enables histappend by default (zsh-style appends); its own integration test
+    # covers that, so exclude it from the bash-defaults comparison.
+    args: ["-i", "-c", "shopt | sort | grep -v extglob | grep -v '^histappend'"]
 
   - name: "shopt -o defaults"
     ignore_whitespace: true # Spacing changes across versions

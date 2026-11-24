@@ -94,8 +94,13 @@ of waiting for the session to end. This is the zsh `INC_APPEND_HISTORY` style: t
 step behind only while a command is still running.
 
 The history file is `$HISTFILE`, which defaults to `~/.brush_history`. Setting `HISTFILE` to
-an empty string keeps history in memory but disables reading and writing the file. Brush
-appends to the file by default, so several sessions can share it.
+an empty string keeps history in memory but disables reading and writing the file.
+
+Brush appends to the file by default, so several sessions can share it. `shopt -u histappend`
+selects bash's overwrite-on-exit behavior instead. `HISTSIZE` caps the in-memory history and
+`HISTFILESIZE` caps the file; each is applied as it is set, and leaving either unset keeps that
+history unbounded. `HISTIGNORE` patterns (including `&` for the previous command) are not
+recorded, and `HISTCONTROL` still applies.
 
 ### `[experimental]` Section
 

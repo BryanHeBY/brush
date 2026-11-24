@@ -41,7 +41,7 @@ This document details `brush`'s compatibility with `bash`, including supported f
 - **Navigation:** `cd`, `pushd`, `popd`, `dirs`, `pwd`
 - **Jobs:** `jobs`, `fg`, `bg`, `wait`, `kill`
 - **Completion:** `complete`, `compgen`, `compopt`
-- **History:** `history`, `fc`
+- **History:** `history`, `fc`, `HISTSIZE`, `HISTFILESIZE`, `HISTIGNORE`, and `histappend`
 - **Testing:** `test`, `[`, `[[`
 - **Sourcing & introspection:** `.`, `source`, `eval`, `caller`
 - **Misc:** `alias`, `unalias`, `hash`, `type`, `command`, `builtin`, `enable`, `help`, `times`, `ulimit`, `umask`, `trap`, `shopt`, `set`, `shift`, `getopts`
