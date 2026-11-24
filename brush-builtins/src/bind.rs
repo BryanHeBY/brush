@@ -157,6 +157,9 @@ impl BindCommand {
         bindings: std::sync::Arc<tokio::sync::Mutex<dyn interfaces::KeyBindings>>,
         context: &mut brush_core::ExecutionContext<'_, impl brush_core::ShellExtensions>,
     ) -> Result<ExecutionResult, BindError> {
+        if context.shell.readline_options().init_file.is_none() {
+            inputrc::load_default_inputrc(context.shell).await;
+        }
         let mut bindings = bindings.lock().await;
         let previous_map = bindings.keymap();
         if let Some(map) = self.keymap {

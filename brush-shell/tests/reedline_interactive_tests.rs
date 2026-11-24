@@ -116,7 +116,114 @@ fn unicode_history_search_recalls_on_character_boundary() -> anyhow::Result<()> 
     Ok(())
 }
 
-/// Like readline, completion sees the whole line, not just the text before the cursor:/// Like readline, completion sees the whole line, not just the text before the cursor:
+/// An rc file may export a new INPUTRC. The first prompt must use it, but a `bind` in the
+/// rc is applied after that file is loaded and keeps priority.
+#[test]
+fn rcfile_exported_inputrc_is_used_at_the_first_prompt() -> anyhow::Result<()> {
+    let temp = tempfile::tempdir()?;
+    std::fs::write(
+        temp.path().join(".inputrc"),
+        "set completion-ignore-case off\n",
+    )?;
+    let alternate = temp.path().join("alternate-inputrc");
+    std::fs::write(
+        &alternate,
+        "set completion-ignore-case on\n\"\\C-t\": history-search-backward\n",
+    )?;
+    let rc = temp.path().join("rcfile");
+    std::fs::write(
+        &rc,
+        format!(
+            "export INPUTRC={}\nbind '\"\\C-t\": transpose-chars'\n",
+            brush_core::escape::single_quote(alternate.to_str().context("inputrc path")?)
+        ),
+    )?;
+
+    let shell_path = assert_cmd::cargo::cargo_bin!("brush");
+    let mut cmd = std::process::Command::new(shell_path);
+    cmd.args([
+        "--noprofile",
+        "--no-config",
+        "--rcfile",
+        rc.to_str().context("rc path")?,
+        "--disable-bracketed-paste",
+        "--disable-color",
+        "--input-backend=reedline",
+    ]);
+    cmd.env("PS1", PROMPT);
+    cmd.env("TERM", "xterm-256color");
+    cmd.env("HOME", temp.path());
+    cmd.env("HISTFILE", "");
+    let session = expectrl::session::Session::spawn(cmd)?;
+    let mut session = expectrl::session::log(session, std::io::stdout())?;
+    session.set_expect_timeout(Some(Duration::from_secs(15)));
+    expect_next_prompt(&mut session, 0)?;
+
+    session.send_line("bind -V")?;
+    session
+        .expect("completion-ignore-case is set to `on'")
+        .context("rc-exported INPUTRC was not loaded for the first prompt")?;
+
+    session.send_line("bind -q transpose-chars")?;
+    session
+        .expect("\"\\C-t\"")
+        .context("explicit rc binding was overwritten by the inputrc reload")?;
+
+    Ok(())
+}
+
+/// `mark-directories off` must suppress only the trailing slash; file names still need
+/// readline-style escaping so a directory with a space stays one shell argument.
+#[test]
+fn mark_directories_off_keeps_filename_escaping() -> anyhow::Result<()> {
+    let temp = tempfile::tempdir()?;
+    let inputrc = temp.path().join("inputrc");
+    std::fs::write(&inputrc, "set mark-directories off\n")?;
+    std::fs::create_dir(temp.path().join("dir with space"))?;
+    std::fs::write(temp.path().join("file with space"), "")?;
+
+    let mut session = start_reedline_session_with(|cmd| {
+        cmd.current_dir(temp.path())
+            .env("HOME", temp.path())
+            .env("INPUTRC", &inputrc)
+            .env("HISTFILE", "");
+    })?;
+    expect_next_prompt(&mut session, 0)?;
+
+    session.send_line(
+        r#"observe() { printf 'ARG=<%s> N=%s\n' "$1" "$#"; }; complete -o default observe"#,
+    )?;
+    expect_next_prompt(&mut session, 0)?;
+
+    // Directory with mark-directories off: escaped, but no slash.
+    session.send("observe dir\t")?;
+    session.send("\r")?;
+    session
+        .expect("ARG=<dir with space> N=1")
+        .context("mark-directories off dropped filename escaping")?;
+    expect_next_prompt(&mut session, 0)?;
+
+    // A file name with a space is escaped the same way.
+    session.send("observe file\t")?;
+    session.send("\r")?;
+    session
+        .expect("ARG=<file with space> N=1")
+        .context("file completion with a space was not escaped")?;
+    expect_next_prompt(&mut session, 0)?;
+
+    // With the option on, only the trailing slash is added.
+    session.send_line("bind 'set mark-directories on'")?;
+    expect_next_prompt(&mut session, 0)?;
+    session.send("observe dir\t")?;
+    session.send("\r")?;
+    session
+        .expect("ARG=<dir with space/> N=1")
+        .context("mark-directories on did not add the trailing slash")?;
+
+    Ok(())
+}
+
+/// Like readline, completion sees the whole line, not just the text before the cursor:/// Like readline, completion sees the whole line, not just the text before the cursor:/// Like readline, completion sees the whole line, not just the text before the cursor:/// Like readline, completion sees the whole line, not just the text before the cursor:/// Like readline, completion sees the whole line, not just the text before the cursor:
 /// e.g. `COMP_WORDS` includes words after it.
 #[test]
 fn completion_sees_text_after_cursor() -> anyhow::Result<()> {

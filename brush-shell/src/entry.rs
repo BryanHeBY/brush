@@ -453,10 +453,17 @@ async fn initialize_shell(
     };
 
     let mut shell = shell_ref.lock().await;
-    if shell.options().interactive && !args.no_editing && args.will_read_commands_from_stdin() {
+    // Deliberately load the inputrc *after* the startup files: an rc file may export a new
+    // INPUTRC, and the first prompt must use it. A `bind` call inside the rc loads it on
+    // demand, before applying the rc's own bindings.
+    shell.load_config(&profile, &rc).await?;
+    if shell.options().interactive
+        && !args.no_editing
+        && args.will_read_commands_from_stdin()
+        && shell.readline_options().init_file.is_none()
+    {
         brush_builtins::load_default_inputrc(&mut *shell).await;
     }
-    shell.load_config(&profile, &rc).await?;
     drop(shell);
 
     Ok(())
