@@ -345,7 +345,25 @@ fn redirected_stdout_does_not_receive_herdr_osc7() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Like readline, completion sees the whole line, not just the text before the cursor:/// Like readline, completion sees the whole line, not just the text before the cursor:/// Like readline, completion sees the whole line, not just the text before the cursor:/// Like readline, completion sees the whole line, not just the text before the cursor:/// Like readline, completion sees the whole line, not just the text before the cursor:/// Like readline, completion sees the whole line, not just the text before the cursor:
+/// A command that reads stdin after the editor returns must receive keystrokes typed while
+/// it runs; the background crossterm reader must stop when the line is accepted.
+#[test]
+fn command_can_read_input_after_editor_returns() -> anyhow::Result<()> {
+    let mut session = start_reedline_session()?;
+    expect_next_prompt(&mut session, 0)?;
+
+    session.send_line("echo READY; sleep 1; read -n 1 ch; printf 'GOT=<%s>\\n' \"$ch\"")?;
+    session.expect("READY").context("command did not start")?;
+    session.send("z")?;
+    session
+        .expect("GOT=<z>")
+        .context("the crossterm reader consumed input meant for `read`")?;
+    expect_next_prompt(&mut session, 0)?;
+
+    Ok(())
+}
+
+/// Like readline, completion sees the whole line, not just the text before the cursor:/// Like readline, completion sees the whole line, not just the text before the cursor:/// Like readline, completion sees the whole line, not just the text before the cursor:/// Like readline, completion sees the whole line, not just the text before the cursor:/// Like readline, completion sees the whole line, not just the text before the cursor:/// Like readline, completion sees the whole line, not just the text before the cursor:/// Like readline, completion sees the whole line, not just the text before the cursor:
 /// e.g. `COMP_WORDS` includes words after it.
 #[test]
 fn completion_sees_text_after_cursor() -> anyhow::Result<()> {

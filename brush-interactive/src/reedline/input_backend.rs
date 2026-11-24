@@ -288,7 +288,9 @@ impl InputBackend for ReedlineInputBackend {
             options: &options,
             keymaps: &self.keymaps,
         };
-        match reedline.read_line(&prompt) {
+        let signal = reedline.read_line(&prompt);
+        super::terminal_input::pause_crossterm_reader();
+        match signal {
             Ok(reedline::Signal::Success(s)) => Ok(ReadResult::Input(s)),
             Ok(reedline::Signal::CtrlC(_)) => Ok(ReadResult::Interrupted),
             Ok(reedline::Signal::CtrlD) => Ok(ReadResult::Eof),

@@ -31,6 +31,8 @@ pub(super) struct TerminalInput {
 #[cfg(any(unix, windows))]
 static CROSSTERM_READER_ACTIVE: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
+static CROSSTERM_READER_IDLE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(true);
 
 /// Crossterm's blocking reader lives on its own thread so the editing loop can be cancelled
 /// when the terminal hangs up. The thread decodes events exactly as crossterm would.
@@ -48,26 +50,52 @@ fn crossterm_events()
         std::thread::spawn(move || {
             loop {
                 if !CROSSTERM_READER_ACTIVE.load(Ordering::Relaxed) {
-                    std::thread::sleep(std::time::Duration::from_millis(10));
+                    CROSSTERM_READER_IDLE.store(true, Ordering::Release);
+                    std::thread::sleep(std::time::Duration::from_millis(1));
                     continue;
                 }
-                match crossterm::event::poll(std::time::Duration::from_millis(100)) {
-                    Ok(true) => match crossterm::event::read() {
-                        Ok(event) => {
-                            if sender.send(event).is_err() {
-                                return;
+                CROSSTERM_READER_IDLE.store(false, Ordering::Release);
+                // Never block in `read`: the editor can finish the line at any moment, and
+                // this thread must not consume input meant for the command that runs next.
+                match crossterm::event::poll(std::time::Duration::ZERO) {
+                    Ok(true) if CROSSTERM_READER_ACTIVE.load(Ordering::Relaxed) => {
+                        match crossterm::event::read() {
+                            Ok(event) => {
+                                if sender.send(event).is_err() {
+                                    return;
+                                }
+                            }
+                            Err(_) => {
+                                std::thread::sleep(std::time::Duration::from_millis(1));
                             }
                         }
-                        Err(_) => std::thread::sleep(std::time::Duration::from_millis(10)),
-                    },
-                    Ok(false) => {}
-                    Err(_) => std::thread::sleep(std::time::Duration::from_millis(10)),
+                    }
+                    Ok(_) => {}
+                    Err(_) => std::thread::sleep(std::time::Duration::from_millis(1)),
                 }
+                CROSSTERM_READER_IDLE.store(true, Ordering::Release);
+                std::thread::sleep(std::time::Duration::from_millis(1));
             }
         });
         std::sync::Mutex::new(receiver)
     })
 }
+
+/// Stops the background crossterm reader and waits until it is no longer reading. Call after
+/// `read_line` returns, before running the accepted command.
+#[cfg(any(unix, windows))]
+pub(super) fn pause_crossterm_reader() {
+    use std::sync::atomic::Ordering;
+
+    CROSSTERM_READER_ACTIVE.store(false, Ordering::Release);
+    while !CROSSTERM_READER_IDLE.load(Ordering::Acquire) {
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+}
+
+/// Stops the background reader on platforms that do not have one.
+#[cfg(not(any(unix, windows)))]
+pub(super) fn pause_crossterm_reader() {}
 
 pub(super) fn attach(
     reedline: &mut reedline::Reedline,
