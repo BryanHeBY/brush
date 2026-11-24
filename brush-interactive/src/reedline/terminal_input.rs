@@ -28,6 +28,47 @@ pub(super) struct TerminalInput {
     key_timeout: Duration,
 }
 
+#[cfg(any(unix, windows))]
+static CROSSTERM_READER_ACTIVE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Crossterm's blocking reader lives on its own thread so the editing loop can be cancelled
+/// when the terminal hangs up. The thread decodes events exactly as crossterm would.
+#[cfg(any(unix, windows))]
+fn crossterm_events()
+-> &'static std::sync::Mutex<std::sync::mpsc::Receiver<crossterm::event::Event>> {
+    use std::sync::OnceLock;
+    use std::sync::atomic::Ordering;
+    use std::sync::mpsc;
+
+    static EVENTS: OnceLock<std::sync::Mutex<mpsc::Receiver<crossterm::event::Event>>> =
+        OnceLock::new();
+    EVENTS.get_or_init(|| {
+        let (sender, receiver) = mpsc::channel();
+        std::thread::spawn(move || {
+            loop {
+                if !CROSSTERM_READER_ACTIVE.load(Ordering::Relaxed) {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                    continue;
+                }
+                match crossterm::event::poll(std::time::Duration::from_millis(100)) {
+                    Ok(true) => match crossterm::event::read() {
+                        Ok(event) => {
+                            if sender.send(event).is_err() {
+                                return;
+                            }
+                        }
+                        Err(_) => std::thread::sleep(std::time::Duration::from_millis(10)),
+                    },
+                    Ok(false) => {}
+                    Err(_) => std::thread::sleep(std::time::Duration::from_millis(10)),
+                }
+            }
+        });
+        std::sync::Mutex::new(receiver)
+    })
+}
+
 pub(super) fn attach(
     reedline: &mut reedline::Reedline,
     reader: &std::sync::Arc<std::sync::Mutex<TerminalInput>>,
@@ -41,17 +82,48 @@ pub(super) fn attach(
         terminal_input.key_timeout = key_timeout;
         cfg!(unix) && (raw_input || terminal_input.has_pending_input())
     };
-    // Always read through the byte-preserving source: crossterm's own poll can block
-    // forever on a terminal that has been hung up, while this source polls stdin and checks
-    // the hangup flag.
-    let terminal_input = reader.clone();
-    let source: Box<dyn FnMut(_) -> _ + Send> = Box::new(move |timeout| {
-        terminal_input
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .read_event(timeout)
-    });
-    reedline.set_input_source(Some(source));
+    if raw_input {
+        #[cfg(any(unix, windows))]
+        CROSSTERM_READER_ACTIVE.store(false, std::sync::atomic::Ordering::Relaxed);
+        let terminal_input = reader.clone();
+        let source: Box<dyn FnMut(_) -> _ + Send> = Box::new(move |timeout| {
+            terminal_input
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .read_event(timeout)
+        });
+        reedline.set_input_source(Some(source));
+    } else {
+        #[cfg(any(unix, windows))]
+        {
+            CROSSTERM_READER_ACTIVE.store(true, std::sync::atomic::Ordering::Relaxed);
+            let events = crossterm_events();
+            let source: Box<dyn FnMut(_) -> _ + Send> =
+                Box::new(move |timeout: std::time::Duration| {
+                    if crate::hangup::requested() {
+                        return Err(io::Error::new(
+                            io::ErrorKind::Interrupted,
+                            "terminal hangup",
+                        ));
+                    }
+                    let receiver = events
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    match receiver.recv_timeout(timeout) {
+                        Ok(event) => Ok(Some(event)),
+                        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Ok(None),
+                        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Err(
+                            io::Error::new(io::ErrorKind::BrokenPipe, "terminal reader stopped"),
+                        ),
+                    }
+                });
+            reedline.set_input_source(Some(source));
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            reedline.set_input_source(None);
+        }
+    }
     let terminal_input = reader.clone();
     reedline.set_cursor_position_query(raw_input.then(|| {
         let query: Box<dyn Fn() -> _ + Send + Sync> = Box::new(move || {

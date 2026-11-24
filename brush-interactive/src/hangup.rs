@@ -15,6 +15,7 @@ static HANGUP: LazyLock<Arc<AtomicBool>> = LazyLock::new(|| Arc::new(AtomicBool:
 static BREAK: LazyLock<Arc<AtomicBool>> = LazyLock::new(|| Arc::new(AtomicBool::new(false)));
 
 /// Returns a handle that a line editor can poll for a hangup.
+#[cfg(feature = "reedline")]
 pub(crate) fn signal() -> Arc<AtomicBool> {
     BREAK.clone()
 }
