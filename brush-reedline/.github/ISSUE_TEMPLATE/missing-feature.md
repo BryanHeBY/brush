@@ -7,7 +7,7 @@ assignees: ''
 
 ---
 
-Let us know about features you really want to see in reedline. 
+Let us know about features you really want to see in reedline.
 
 ## References
 
