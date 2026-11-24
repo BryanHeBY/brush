@@ -152,6 +152,7 @@ impl ReedlineInputBackend {
             .with_menu(reedline::ReedlineMenu::EngineCompleter(completion_menu))
             .with_edit_mode(Box::new(mutable_edit_mode))
             .with_ordered_input(true)
+            .with_break_signal(crate::hangup::signal())
             .with_history(Box::new(history));
 
         // Override Reedline's default example highlighter, which hard-codes white as the
@@ -301,6 +302,7 @@ impl InputBackend for ReedlineInputBackend {
                     });
                 Ok(ReadResult::BoundCommand(command))
             }
+            Ok(reedline::Signal::ExternalBreak(_)) => Ok(ReadResult::Eof),
             Ok(reedline::Signal::HostCommand(cmd)) => Ok(ReadResult::BoundCommand(cmd)),
             Ok(_) => Err(ShellError::UnexpectedInputFailure),
             Err(err) => Err(ShellError::InputError(err)),

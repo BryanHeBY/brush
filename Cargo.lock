@@ -659,6 +659,7 @@ dependencies = [
  "indent",
  "indexmap",
  "junit-report",
+ "libc",
  "nix 0.31.4",
  "os-release",
  "predicates",

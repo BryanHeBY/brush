@@ -584,10 +584,13 @@ fn start_history_session(
     if let Some(backend) = backend {
         cmd.arg(format!("--input-backend={backend}"));
     }
+    let inputrc = home.join("inputrc");
+    std::fs::write(&inputrc, "")?;
     cmd.env("PS1", "hist> ");
     cmd.env("TERM", "xterm-256color");
     cmd.env("HOME", home);
     cmd.env("HISTFILE", home.join("history"));
+    cmd.env("INPUTRC", inputrc);
 
     let session = expectrl::session::Session::spawn(cmd)?;
     let session = expectrl::repl::ReplSession::new(session, "hist> ");
@@ -860,6 +863,181 @@ fn empty_histfile_keeps_memory_history() -> anyhow::Result<()> {
     );
 
     session.exit()?;
+    Ok(())
+}
+
+/// A bare PTY whose master descriptor the test owns, so it can be closed to hang the terminal
+/// up. `expectrl` keeps its master behind a duplicated handle, which cannot be closed that way.
+struct RawPty {
+    master: Option<std::fs::File>,
+    child: std::process::Child,
+    pending: Vec<u8>,
+}
+
+impl RawPty {
+    fn spawn(home: &std::path::Path) -> anyhow::Result<Self> {
+        let pty = nix::pty::openpty(None, None)?;
+        let slave = std::fs::File::from(pty.slave);
+
+        let shell_path = assert_cmd::cargo::cargo_bin!("brush");
+        let mut cmd = std::process::Command::new(shell_path);
+        cmd.args([
+            "--noprofile",
+            "--norc",
+            "--no-config",
+            "--disable-bracketed-paste",
+            "--disable-color",
+        ]);
+        cmd.stdin(std::process::Stdio::from(slave.try_clone()?));
+        cmd.stdout(std::process::Stdio::from(slave.try_clone()?));
+        cmd.stderr(std::process::Stdio::from(slave));
+        let inputrc = home.join("inputrc");
+        std::fs::write(&inputrc, "")?;
+        cmd.env("PS1", "hist> ");
+        cmd.env("TERM", "xterm-256color");
+        cmd.env("HOME", home);
+        cmd.env("HISTFILE", home.join("history"));
+        cmd.env("INPUTRC", inputrc);
+        // SAFETY: the pre-exec closure only calls async-signal-safe libc/nix functions to make
+        // the child a session leader with this PTY as its controlling terminal.
+        unsafe {
+            cmd.pre_exec(|| {
+                nix::unistd::setsid()?;
+                if libc::ioctl(0, libc::TIOCSCTTY, 0) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+
+        // `openpty` does not set close-on-exec; without this the child would inherit a
+        // duplicate of the master, so closing ours would not hang the terminal up.
+        unsafe {
+            libc::fcntl(
+                std::os::fd::AsRawFd::as_raw_fd(&pty.master),
+                libc::F_SETFD,
+                libc::FD_CLOEXEC,
+            );
+        }
+
+        let child = cmd.spawn()?;
+        let master = std::fs::File::from(pty.master);
+        let flags = unsafe { libc::fcntl(std::os::fd::AsRawFd::as_raw_fd(&master), libc::F_GETFL) };
+        unsafe {
+            libc::fcntl(
+                std::os::fd::AsRawFd::as_raw_fd(&master),
+                libc::F_SETFL,
+                flags | libc::O_NONBLOCK,
+            );
+        }
+
+        Ok(Self {
+            master: Some(master),
+            child,
+            pending: Vec::new(),
+        })
+    }
+
+    fn send_line(&mut self, line: &str) -> anyhow::Result<()> {
+        use std::io::Write as _;
+        let master = self.master.as_mut().context("master closed")?;
+        master.write_all(line.as_bytes())?;
+        master.write_all(b"\n")?;
+        master.flush()?;
+        Ok(())
+    }
+
+    fn expect(&mut self, needle: &str) -> anyhow::Result<()> {
+        use std::io::Read as _;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            if let Some(position) = self
+                .pending
+                .windows(needle.len())
+                .position(|window| window == needle.as_bytes())
+            {
+                self.pending.drain(..position + needle.len());
+                return Ok(());
+            }
+            anyhow::ensure!(
+                std::time::Instant::now() < deadline,
+                "timed out waiting for {needle:?}; pending: {:?}",
+                String::from_utf8_lossy(&self.pending)
+            );
+            let mut buffer = [0u8; 4096];
+            let master = self.master.as_mut().context("master closed")?;
+            match master.read(&mut buffer) {
+                Ok(0) => anyhow::bail!("PTY closed while waiting for {needle:?}"),
+                Ok(count) => self.pending.extend_from_slice(&buffer[..count]),
+                Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                Err(err) => return Err(err.into()),
+            }
+        }
+    }
+
+    fn close_master(&mut self) {
+        self.master.take();
+    }
+
+    fn wait_for_exit(&mut self) -> anyhow::Result<std::process::ExitStatus> {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            if let Some(status) = self.child.try_wait()? {
+                return Ok(status);
+            }
+            anyhow::ensure!(
+                std::time::Instant::now() < deadline,
+                "shell did not exit after closing the PTY"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    }
+}
+
+/// Closing the PTY master must end the session, save the recorded commands, and leave them
+/// readable in a later session. This is the real hangup path, not a signal delivered while the
+/// master stays open.
+#[test]
+fn history_survives_closed_pty() -> anyhow::Result<()> {
+    let home = tempfile::tempdir()?;
+    let mut session = RawPty::spawn(home.path())?;
+    session.expect("hist> ")?;
+    session.send_line("printf 'confirmed-%s\\n' execution")?;
+    session.expect("confirmed-execution")?;
+    session.expect("hist> ")?;
+
+    session.close_master();
+    let status = session.wait_for_exit()?;
+    assert_eq!(
+        status.code(),
+        Some(129),
+        "unexpected exit status: {status:?}"
+    );
+
+    let contents = read_history_file(home.path());
+    assert!(
+        contents.contains("printf 'confirmed-%s\\n' execution"),
+        "history lost after closing the PTY: {contents:?}"
+    );
+
+    // A later session must be able to read it back.
+    let mut reopened = start_history_session(Some("basic"), None, home.path())?;
+    reopened.expect_prompt()?;
+    let seen = home.path().join("reopened-history.txt");
+    reopened.send_line(format!(
+        "history > {}; echo REOPEN-DONE",
+        brush_core::escape::single_quote(seen.to_str().context("reopened path")?)
+    ))?;
+    reopened.expect("REOPEN-DONE")?;
+    reopened.expect_prompt()?;
+    let history = std::fs::read_to_string(&seen)?;
+    assert!(
+        history.contains("printf 'confirmed-%s\\n' execution"),
+        "reopened session did not see the command: {history:?}"
+    );
+
     Ok(())
 }
 

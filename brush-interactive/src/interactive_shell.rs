@@ -252,13 +252,30 @@ impl<'a, IB: InputBackend, SE: brush_core::ShellExtensions> InteractiveShell<'a,
 
         drop(shell);
 
+        #[cfg(unix)]
         if let Some(watcher) = hangup_watcher {
             watcher.abort();
         }
+        #[cfg(not(unix))]
+        let _ = hangup_watcher;
 
-        looped?;
-        ended?;
-        exited?;
+        if crate::hangup::requested() {
+            // The terminal may already be gone; a cleanup error must not turn the saved
+            // session into a generic failure. The exit status stays 128 + SIGHUP.
+            if let Err(e) = looped {
+                tracing::debug!("interactive loop error after hangup: {e}");
+            }
+            if let Err(e) = ended {
+                tracing::debug!("couldn't end interactive session after hangup: {e}");
+            }
+            if let Err(e) = exited {
+                tracing::debug!("on-exit error after hangup: {e}");
+            }
+        } else {
+            looped?;
+            ended?;
+            exited?;
+        }
 
         Ok(())
     }

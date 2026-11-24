@@ -41,16 +41,17 @@ pub(super) fn attach(
         terminal_input.key_timeout = key_timeout;
         cfg!(unix) && (raw_input || terminal_input.has_pending_input())
     };
+    // Always read through the byte-preserving source: crossterm's own poll can block
+    // forever on a terminal that has been hung up, while this source polls stdin and checks
+    // the hangup flag.
     let terminal_input = reader.clone();
-    reedline.set_input_source(raw_input.then(|| {
-        let source: Box<dyn FnMut(_) -> _ + Send> = Box::new(move |timeout| {
-            terminal_input
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .read_event(timeout)
-        });
-        source
-    }));
+    let source: Box<dyn FnMut(_) -> _ + Send> = Box::new(move |timeout| {
+        terminal_input
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .read_event(timeout)
+    });
+    reedline.set_input_source(Some(source));
     let terminal_input = reader.clone();
     reedline.set_cursor_position_query(raw_input.then(|| {
         let query: Box<dyn Fn() -> _ + Send + Sync> = Box::new(move || {
@@ -190,6 +191,9 @@ fn read_byte(timeout: Duration) -> io::Result<Option<u8>> {
     }
     let mut byte = [0];
     if brush_core::sys::input::read_stdin_bytes(&mut byte)? == 0 {
+        // A closed terminal reads as EOF here (unlike Ctrl-D, which arrives as a byte). Treat
+        // it as the hangup it is, so the session saves history and exits 129.
+        crate::hangup::request();
         return Err(io::Error::new(
             io::ErrorKind::UnexpectedEof,
             "terminal input closed",
