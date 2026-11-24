@@ -215,6 +215,14 @@ fn mark_directories_off_keeps_filename_escaping() -> anyhow::Result<()> {
         .context("file completion with a space was not escaped")?;
     expect_next_prompt(&mut session, 0)?;
 
+    // The default completion path (no `complete` spec for `printf`) must escape too.
+    session.send("printf '<%s>\\n' file\t")?;
+    session.send("\r")?;
+    session
+        .expect("<file with space>")
+        .context("default file completion with a space was not escaped")?;
+    expect_next_prompt(&mut session, 0)?;
+
     // With the option on, only the trailing slash is added.
     session.send_line("bind 'set mark-directories on'")?;
     expect_next_prompt(&mut session, 0)?;
