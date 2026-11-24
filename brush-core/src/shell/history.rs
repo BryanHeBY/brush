@@ -51,7 +51,13 @@ fn join_multiline_command(command: &str) -> String {
                     | ";"
             );
 
-            if keyword || previous.ends_with(';') {
+            let trailing_operator = previous.ends_with('|')
+                || previous.ends_with('&')
+                || previous.ends_with(';')
+                || previous.ends_with('(')
+                || previous.ends_with('{')
+                || previous.ends_with('!');
+            if keyword || trailing_operator {
                 joined.push(' ');
             } else {
                 joined.push_str("; ");
@@ -195,23 +201,22 @@ fn complete_record_end(bytes: &[u8]) -> usize {
     }
 
     let mut offset = 0;
-    let mut timestamp_start = None;
+    let mut trailing_timestamp = None;
     let mut has_command = false;
     for line in lines {
         if is_timestamp(line) {
-            if timestamp_start.is_some() && !has_command {
-                return timestamp_start.unwrap_or(offset);
+            if has_command || trailing_timestamp.is_none() {
+                trailing_timestamp = Some(offset);
+                has_command = false;
             }
-            timestamp_start = Some(offset);
-            has_command = false;
-        } else if !line.is_empty() || timestamp_start.is_some() {
+        } else {
             has_command = true;
         }
         offset += line.len() + 1;
     }
 
-    if timestamp_start.is_some() && !has_command {
-        timestamp_start.unwrap_or(end)
+    if trailing_timestamp.is_some() && !has_command {
+        trailing_timestamp.unwrap_or(end)
     } else {
         end
     }
@@ -370,9 +375,12 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
         } else {
             None
         };
-        let candidate = stored.as_ref().and_then(|(stored_path, position, _, _)| {
-            (stored_path == &path && *position <= length).then_some(*position)
-        });
+        let candidate = stored
+            .as_ref()
+            .and_then(|(stored_path, position, stored_id, _)| {
+                (stored_path == &path && *position <= length && stored_id == &file_id)
+                    .then_some(*position)
+            });
 
         let read_from = candidate.map_or(0, |position| position.saturating_sub(256));
         let mut bytes = Vec::new();
@@ -526,15 +534,52 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
         };
         let write_timestamps = self.env.is_set("HISTTIMEFORMAT");
 
-        // Read, append, and advance the cursor under one lock. Otherwise another session can
-        // append after our read and before our write, and moving the cursor to the end would
-        // make the next read skip that record.
         let _lock = crate::history::lock_history_file(history_file_path.as_path())?;
-        if history_file_path.exists() {
-            self.read_history_file(Some(history_file_path.as_path()), true)?;
-        }
         if let Some(history) = &mut self.history {
             history.append_unsaved(history_file_path.as_path(), write_timestamps)?;
+        }
+        self.remember_history_file_end();
+
+        Ok(())
+    }
+
+    /// Imports and appends in one transaction for an explicit share session.
+    ///
+    /// Pending local entries are held aside while foreign records are imported, so a
+    /// HISTSIZE trim cannot discard a command that has not reached disk yet. The new cursor
+    /// is recorded before releasing the lock.
+    pub fn share_history(&mut self) -> Result<(), error::Error> {
+        let Some(history_file_path) = self.history_file_path() else {
+            return Ok(());
+        };
+        let write_timestamps = self.env.is_set("HISTTIMEFORMAT");
+
+        let _lock = crate::history::lock_history_file(history_file_path.as_path())?;
+        let pending = self
+            .history
+            .as_mut()
+            .map(crate::history::History::take_dirty)
+            .unwrap_or_default();
+
+        let read_result = if history_file_path.exists() {
+            self.read_history_file(Some(history_file_path.as_path()), true)
+        } else {
+            Ok(())
+        };
+
+        if let Some(history) = &mut self.history {
+            for item in pending {
+                history.add(item)?;
+            }
+        }
+        read_result?;
+
+        let size_limit = self.history_size_limit();
+        if let Some(history) = &mut self.history {
+            history.append_unsaved(history_file_path.as_path(), write_timestamps)?;
+            if let Some(limit) = size_limit {
+                history.retain_last(limit);
+            }
         }
         self.remember_history_file_end();
 
@@ -701,6 +746,71 @@ mod tests {
         Ok(())
     }
 
+    #[tokio::test]
+    async fn share_history_protects_pending_commands_from_histsize() -> Result<(), error::Error> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("history");
+        std::fs::write(&path, "external\n")?;
+
+        let mut shell = crate::Shell::builder().build().await?;
+        shell.set_env_global(
+            "HISTFILE",
+            ShellVariable::new(path.to_string_lossy().to_string()),
+        )?;
+        shell.set_env_global("HISTSIZE", ShellVariable::new("1"))?;
+        shell.history = Some(History::default());
+        shell
+            .history_mut()
+            .expect("history")
+            .add(crate::history::Item::new("local-pending"))?;
+
+        shell.share_history()?;
+
+        let contents = std::fs::read_to_string(&path)?;
+        assert!(contents.contains("external"), "{contents:?}");
+        assert!(contents.contains("local-pending"), "{contents:?}");
+        assert!(
+            shell
+                .history()
+                .expect("history")
+                .iter()
+                .any(|item| item.command_line == "local-pending")
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn append_history_does_not_import_other_sessions() -> Result<(), error::Error> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("history");
+        std::fs::write(&path, "external\n")?;
+
+        let mut shell = crate::Shell::builder().build().await?;
+        shell.set_env_global(
+            "HISTFILE",
+            ShellVariable::new(path.to_string_lossy().to_string()),
+        )?;
+        shell.history = Some(History::default());
+        shell
+            .history_mut()
+            .expect("history")
+            .add(crate::history::Item::new("local-only"))?;
+
+        shell.append_history()?;
+
+        let lines: Vec<_> = shell
+            .history()
+            .expect("history")
+            .iter()
+            .map(|item| item.command_line.as_str())
+            .collect();
+        assert_eq!(lines, ["local-only"]);
+        let contents = std::fs::read_to_string(&path)?;
+        assert!(contents.contains("external"), "{contents:?}");
+        assert!(contents.contains("local-only"), "{contents:?}");
+        Ok(())
+    }
+
     #[test]
     fn complete_record_end_waits_for_a_timestamped_command() {
         assert_eq!(complete_record_end(b"#1700000000\n"), 0);
@@ -708,6 +818,43 @@ mod tests {
         assert_eq!(complete_record_end(b"#1700000000\ncmd\n#1700000001\n"), 16);
         assert_eq!(complete_record_end(b"cmd\n"), 4);
         assert_eq!(complete_record_end(b"#1700000000\nonly-one\n#1\n"), 21);
+        assert_eq!(complete_record_end(b"#1\n#2\nbody\n"), 11);
+        assert_eq!(complete_record_end(b"#1\n#2\n"), 0);
+        assert_eq!(complete_record_end(b"#1\nbody\n#2\n#3\n"), 8);
+    }
+
+    #[tokio::test]
+    async fn share_rechecks_a_same_length_replacement() -> Result<(), error::Error> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("history");
+        let filler = "x".repeat(300);
+        std::fs::write(&path, format!("OLD-ENTRY\n{filler}\n"))?;
+        let old_len = std::fs::metadata(&path)?.len();
+
+        let loaded = History::import(std::fs::File::open(&path)?)?;
+        let mut shell = crate::Shell::builder().build().await?;
+        shell.set_env_global(
+            "HISTFILE",
+            ShellVariable::new(path.to_string_lossy().to_string()),
+        )?;
+        shell.history = Some(loaded);
+        shell.remember_history_file_position();
+
+        let replacement = dir.path().join("replacement");
+        std::fs::write(&replacement, format!("NEW-ENTRY\n{filler}\n"))?;
+        assert_eq!(std::fs::metadata(&replacement)?.len(), old_len);
+        std::fs::rename(&replacement, &path)?;
+
+        shell.read_new_history()?;
+        assert!(
+            shell
+                .history()
+                .expect("history")
+                .iter()
+                .any(|item| item.command_line == "NEW-ENTRY"),
+            "same-length replacement was skipped"
+        );
+        Ok(())
     }
 
     #[tokio::test]
@@ -793,8 +940,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn append_reads_foreign_entries_before_advancing_the_cursor() -> Result<(), error::Error>
-    {
+    async fn share_reads_foreign_entries_before_advancing_the_cursor() -> Result<(), error::Error> {
         let dir = tempfile::tempdir()?;
         let path = dir.path().join("history");
         std::fs::write(&path, "foreign-before-append\n")?;
@@ -810,7 +956,7 @@ mod tests {
             .expect("history")
             .add(crate::history::Item::new("mine"))?;
 
-        shell.append_history()?;
+        shell.share_history()?;
 
         let lines: Vec<_> = shell
             .history()

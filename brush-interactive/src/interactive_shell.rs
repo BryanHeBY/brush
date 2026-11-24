@@ -206,14 +206,12 @@ impl<'a, IB: InputBackend, SE: brush_core::ShellExtensions> InteractiveShell<'a,
             // next one. A failure leaves the items unsaved for the next attempt.
             if self.options.history_append_immediately || self.options.history_share {
                 let mut shell = self.shell.lock().await;
-                // Import first, so another session's entries written while this command ran
-                // are not skipped when the save advances the read position past them.
-                if self.options.history_share
-                    && let Err(e) = shell.read_new_history()
-                {
-                    tracing::debug!("couldn't read new history: {e}");
-                }
-                if let Err(e) = shell.append_history() {
+                let result = if self.options.history_share {
+                    shell.share_history()
+                } else {
+                    shell.append_history()
+                };
+                if let Err(e) = result {
                     tracing::debug!("couldn't append history: {e}");
                 }
             }

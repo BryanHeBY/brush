@@ -199,6 +199,21 @@ impl History {
         self.first_dirty = self.items.iter().position(|item| item.dirty);
     }
 
+    /// Removes and returns all dirty entries. Share mode holds these aside while importing
+    /// foreign records so a HISTSIZE trim cannot discard commands that still need writing.
+    pub(crate) fn take_dirty(&mut self) -> Vec<Item> {
+        let dirty: Vec<Item> = self
+            .items
+            .iter()
+            .filter(|item| item.dirty)
+            .cloned()
+            .collect();
+        if !dirty.is_empty() {
+            self.retain(|item| !item.dirty);
+        }
+        dirty
+    }
+
     /// Discards the oldest entries until at most `limit` remain.
     pub fn retain_last(&mut self, limit: usize) {
         let removed = self.count().saturating_sub(limit);
@@ -987,18 +1002,24 @@ fn trim_history_entries(contents: &str, max_items: usize) -> String {
 pub(crate) fn lock_history_file(
     path: &Path,
 ) -> Result<crate::sys::fs::HistoryFileLock, error::Error> {
-    use std::hash::{Hash as _, Hasher as _};
-
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    path.hash(&mut hasher);
-    let lock_path =
-        std::env::temp_dir().join(format!("brush-history-{:016x}.lock", hasher.finish()));
+    let lock_path = history_lock_path(path);
     let file = std::fs::OpenOptions::new()
         .create(true)
         .truncate(false)
         .write(true)
         .open(lock_path)?;
     Ok(crate::sys::fs::lock_history_file(file)?)
+}
+
+/// Returns the lock file path for a history path, resolving symlinks so every spelling of the
+/// same file uses the same lock.
+fn history_lock_path(path: &Path) -> std::path::PathBuf {
+    use std::hash::{Hash as _, Hasher as _};
+
+    let lock_identity = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    lock_identity.hash(&mut hasher);
+    std::env::temp_dir().join(format!("brush-history-{:016x}.lock", hasher.finish()))
 }
 
 /// Writes `contents` to a temporary file next to the target, then renames it into place.
@@ -1024,10 +1045,27 @@ fn atomic_write(path: &Path, contents: &[u8]) -> Result<(), error::Error> {
     let temp_path = target.with_file_name(temp_name);
 
     let result = (|| -> Result<(), error::Error> {
-        std::fs::write(&temp_path, contents)?;
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&temp_path)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            // The create mode above applies only to a new file; make sure a stale temporary
+            // is private before any history bytes are written to it.
+            file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+        }
+        file.write_all(contents)?;
         if let Some(permissions) = permissions {
             std::fs::set_permissions(&temp_path, permissions)?;
         }
+        file.sync_all()?;
+        drop(file);
         std::fs::rename(&temp_path, &target)?;
         Ok(())
     })();
@@ -1273,6 +1311,20 @@ mod tests {
         history.flush(&path, false, false, false)?;
         assert_eq!(read()?, "old\nnew1\nnew2\n");
 
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_and_target_share_a_history_lock() -> Result<(), error::Error> {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir()?;
+        let target = dir.path().join("target");
+        let link = dir.path().join("link");
+        std::fs::write(&target, "")?;
+        symlink(&target, &link)?;
+        assert_eq!(history_lock_path(&target), history_lock_path(&link));
         Ok(())
     }
 

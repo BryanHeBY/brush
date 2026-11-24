@@ -1115,6 +1115,15 @@ fn immediate_append_does_not_overwrite_other_sessions() -> anyhow::Result<()> {
             "mid-session append with {setting:?} did not save its own entry: {contents:?}"
         );
 
+        // Only share mode imports foreign entries into this session's memory; immediate
+        // appending is write-only.
+        session.send_line("history > \"$HOME/seen\"; echo SEEN")?;
+        session.expect("SEEN")?;
+        session.expect_prompt()?;
+        let seen = std::fs::read_to_string(home.path().join("seen"))?;
+        let imported = seen.contains("external-unique");
+        assert_eq!(imported, setting == "share = true", "{setting:?}: {seen:?}");
+
         session
             .get_session_mut()
             .get_process_mut()
@@ -1167,6 +1176,7 @@ fn lithist_timestamped_entry_round_trips() -> anyhow::Result<()> {
 /// The first `history -n` starts from where the startup import stopped, and later calls only
 /// import new complete records, even across replacement, truncation, and a partial last line.
 #[test]
+#[allow(clippy::too_many_lines, reason = "one end-to-end cursor scenario")]
 fn history_n_starts_after_startup_import() -> anyhow::Result<()> {
     use std::io::Write as _;
 
@@ -1253,6 +1263,38 @@ fn history_n_starts_after_startup_import() -> anyhow::Result<()> {
         timestamped.matches("timestamp-body").count(),
         1,
         "{timestamped:?}"
+    );
+
+    // Consecutive timestamps before a command must not pin the cursor; an empty trailing
+    // run should still wait for the next body.
+    std::fs::write(&history_path, "#1700000001\n#1700000002\ntime-body\n")?;
+    session.send_line("history -n")?;
+    session.expect_prompt()?;
+    let timestamped_run = snapshot(&mut session, "timestamped-run.txt")?;
+    assert_eq!(
+        timestamped_run.matches("time-body").count(),
+        1,
+        "{timestamped_run:?}"
+    );
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(&history_path)?
+        .write_all(b"#1700000003\n#1700000004\n")?;
+    session.send_line("history -n")?;
+    session.expect_prompt()?;
+    let empty_run = snapshot(&mut session, "empty-run.txt")?;
+    assert!(!empty_run.contains("next-body"), "{empty_run:?}");
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(&history_path)?
+        .write_all(b"next-body\n")?;
+    session.send_line("history -n")?;
+    session.expect_prompt()?;
+    let completed_run = snapshot(&mut session, "completed-run.txt")?;
+    assert_eq!(
+        completed_run.matches("next-body").count(),
+        1,
+        "{completed_run:?}"
     );
 
     // An explicit path is read independently of the default file's cursor.
