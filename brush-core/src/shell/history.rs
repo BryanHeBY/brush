@@ -363,35 +363,45 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
         let mut file = std::fs::File::open(&path)?;
         let metadata = file.metadata()?;
         let file_id = Some(history_file_identity(&metadata));
-        let mut bytes = Vec::new();
-        file.read_to_end(&mut bytes)?;
-
-        let complete_end = complete_record_end(&bytes);
-        let checksum_at = |offset: usize| tail_checksum(&bytes[..offset]);
+        let length = metadata.len();
 
         let stored = if new_only {
             self.history_read_position.clone()
         } else {
             None
         };
-        let offset = if new_only {
-            match &stored {
-                Some((position_path, position, _stored_id, stored_checksum))
-                    if position_path == &path
-                        && (*position as usize) <= complete_end
-                        && checksum_at(*position as usize) == *stored_checksum =>
-                {
-                    *position as usize
-                }
-                _ => 0,
-            }
-        } else {
-            0
-        };
-        // Only import complete lines. A writer may be halfway through the last record; leave
-        // the position before it so the next read picks up the completed line.
-        if complete_end <= offset {
-            self.history_read_position = Some((path, offset as u64, file_id, checksum_at(offset)));
+        let candidate = stored.as_ref().and_then(|(stored_path, position, _, _)| {
+            (stored_path == &path && *position <= length).then_some(*position)
+        });
+
+        let read_from = candidate.map_or(0, |position| position.saturating_sub(256));
+        let mut bytes = Vec::new();
+        file.seek(SeekFrom::Start(read_from))?;
+        file.read_to_end(&mut bytes)?;
+
+        let mut offset = candidate.map_or(0, |position| position as usize);
+        let mut prefix_len = offset - read_from as usize;
+        if offset > 0
+            && stored
+                .as_ref()
+                .is_some_and(|(_, _, _, checksum)| tail_checksum(&bytes[..prefix_len]) != *checksum)
+        {
+            offset = 0;
+            prefix_len = 0;
+            file.seek(SeekFrom::Start(0))?;
+            bytes.clear();
+            file.read_to_end(&mut bytes)?;
+        }
+
+        let new_bytes = &bytes[prefix_len..];
+        let complete_end = complete_record_end(new_bytes);
+        if complete_end == 0 {
+            self.history_read_position = Some((
+                path,
+                offset as u64,
+                file_id,
+                tail_checksum(&bytes[..prefix_len]),
+            ));
             return Ok(());
         }
 
@@ -406,9 +416,6 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
             return Err(error::ErrorKind::HistoryNotEnabled.into());
         };
         if cursor_reset {
-            // A rewrite (normal exit, HISTFILESIZE trim, or rotation) can replace the inode,
-            // so the old byte offset no longer applies. Skip leading records already at the
-            // tail of memory before importing the rest.
             let imported = crate::history::History::import(&bytes[..complete_end])?;
             let imported_lines: Vec<_> = imported
                 .iter()
@@ -437,16 +444,16 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
                 history.add(item)?;
             }
         } else {
-            history.append_from(&bytes[offset..complete_end])?;
+            history.append_from(&new_bytes[..complete_end])?;
         }
         if let Some(limit) = size_limit {
             history.retain_last(limit);
         }
         self.history_read_position = Some((
             path,
-            complete_end as u64,
+            (offset + complete_end) as u64,
             file_id,
-            checksum_at(complete_end),
+            tail_checksum(&bytes[..prefix_len + complete_end]),
         ));
 
         Ok(())
