@@ -2,7 +2,7 @@
 
 use std::{
     collections::BTreeSet,
-    io::Read,
+    io::{Read, Seek, SeekFrom},
     path::{Path, PathBuf},
 };
 
@@ -372,9 +372,14 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
         };
         let file_id = Some(history_file_identity(&metadata));
         let offset = metadata.len();
-        let checksum = std::fs::read(&path)
-            .map(|bytes| tail_checksum(&bytes))
-            .unwrap_or_default();
+        let checksum = (|| {
+            let mut file = std::fs::File::open(&path)?;
+            file.seek(SeekFrom::Start(offset.saturating_sub(256)))?;
+            let mut tail = Vec::new();
+            file.read_to_end(&mut tail)?;
+            Ok::<_, std::io::Error>(tail_checksum(&tail))
+        })()
+        .unwrap_or_default();
         self.history_read_position = Some((path, offset, file_id, checksum));
     }
 
