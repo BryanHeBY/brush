@@ -274,12 +274,11 @@ fn mark_directories_off_keeps_filename_escaping() -> anyhow::Result<()> {
 
 /// Terminal-control sequences must go to the controlling terminal, not into a redirected
 /// stdout. Herdr still needs its OSC 7 directory update.
-#[test]
 #[allow(
     clippy::multiple_unsafe_ops_per_block,
-    reason = "pre-exec setup and controlling-terminal ioctl are one operation"
+    reason = "pre-exec setup and optional controlling-terminal ioctl are one operation"
 )]
-fn redirected_stdout_does_not_receive_herdr_osc7() -> anyhow::Result<()> {
+fn herdr_with_redirected_stdout(controlling_terminal: bool) -> anyhow::Result<()> {
     use std::io::Write as _;
     use std::os::fd::AsRawFd as _;
     use std::os::unix::process::CommandExt as _;
@@ -309,12 +308,12 @@ fn redirected_stdout_does_not_receive_herdr_osc7() -> anyhow::Result<()> {
     cmd.env("TERM_PROGRAM", "herdr");
     cmd.env("HOME", temp.path());
     cmd.env("HISTFILE", "");
-    // SAFETY: the pre-exec hook makes the child a session leader with the test PTY as its
-    // controlling terminal; it only calls async-signal-safe functions.
+    // SAFETY: the pre-exec hook only calls async-signal-safe functions. When
+    // `controlling_terminal` is set it also makes the test PTY the controlling terminal.
     unsafe {
-        cmd.pre_exec(|| {
+        cmd.pre_exec(move || {
             nix::unistd::setsid()?;
-            if libc::ioctl(0, libc::TIOCSCTTY, 0) != 0 {
+            if controlling_terminal && libc::ioctl(0, libc::TIOCSCTTY, 0) != 0 {
                 return Err(std::io::Error::last_os_error());
             }
             Ok(())
@@ -350,10 +349,17 @@ fn redirected_stdout_does_not_receive_herdr_osc7() -> anyhow::Result<()> {
         std::thread::sleep(Duration::from_millis(20));
     }
     let terminal_text = String::from_utf8_lossy(&terminal_bytes);
-    assert!(
-        terminal_text.contains("\x1b]7;file://"),
-        "terminal did not receive OSC 7: {terminal_text:?}"
-    );
+    if controlling_terminal {
+        assert!(
+            terminal_text.contains("\x1b]7;file://"),
+            "terminal did not receive OSC 7: {terminal_text:?}"
+        );
+    } else {
+        assert!(
+            !terminal_text.contains("\x1b]7;file://"),
+            "OSC 7 was sent without a controlling terminal: {terminal_text:?}"
+        );
+    }
     assert!(
         terminal_text.contains(PROMPT),
         "no prompt on the terminal: {terminal_text:?}"
@@ -380,6 +386,16 @@ fn redirected_stdout_does_not_receive_herdr_osc7() -> anyhow::Result<()> {
     let _ = child.kill();
     let _ = child.wait();
     Ok(())
+}
+
+#[test]
+fn redirected_stdout_does_not_receive_herdr_osc7() -> anyhow::Result<()> {
+    herdr_with_redirected_stdout(true)
+}
+
+#[test]
+fn no_controlling_terminal_does_not_leak_herdr_osc7() -> anyhow::Result<()> {
+    herdr_with_redirected_stdout(false)
 }
 
 /// A command that reads stdin after the editor returns must receive keystrokes typed while

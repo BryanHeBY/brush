@@ -1,6 +1,6 @@
 use std::borrow::Cow;
 use std::fmt::Write;
-use std::io::Write as _;
+use std::io::{IsTerminal as _, Write as _};
 use std::path::Path;
 
 use crate::term_detection;
@@ -82,16 +82,24 @@ impl TerminalIntegration {
         let mut output: Box<dyn std::io::Write> =
             match std::fs::OpenOptions::new().write(true).open("/dev/tty") {
                 Ok(file) => Box::new(file),
-                Err(_) => Box::new(std::io::stdout()),
+                Err(_) if std::io::stdout().is_terminal() => Box::new(std::io::stdout()),
+                // No controlling terminal and stdout is redirected: drop the sequence
+                // rather than pollute the file.
+                Err(_) => return Ok(()),
             };
         #[cfg(windows)]
         let mut output: Box<dyn std::io::Write> =
             match std::fs::OpenOptions::new().write(true).open("CONOUT$") {
                 Ok(file) => Box::new(file),
-                Err(_) => Box::new(std::io::stdout()),
+                Err(_) if std::io::stdout().is_terminal() => Box::new(std::io::stdout()),
+                Err(_) => return Ok(()),
             };
         #[cfg(not(any(unix, windows)))]
-        let mut output: Box<dyn std::io::Write> = Box::new(std::io::stdout());
+        let mut output: Box<dyn std::io::Write> = if std::io::stdout().is_terminal() {
+            Box::new(std::io::stdout())
+        } else {
+            return Ok(());
+        };
 
         output.write_all(seq.as_bytes())?;
         output.flush()
