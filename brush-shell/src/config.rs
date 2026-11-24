@@ -33,6 +33,10 @@ pub struct Config {
 }
 
 /// User interface configuration options.
+///
+/// Built from a configuration file or with [`Default`]. New settings are added as the shell
+/// gains them; use `..Default::default()` when constructing a value by hand so later fields
+/// do not break the literal.
 #[derive(Debug, Default, Clone, serde::Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(default)]

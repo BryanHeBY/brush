@@ -1,4 +1,21 @@
 /// Options for a shell user interface.
+///
+/// New optional settings are added to this struct as the shell gains features. Code that
+/// constructs it with a complete struct literal must add every new field; prefer the builder
+/// or a struct-update expression so that later additions keep compiling:
+///
+/// ```
+/// let options = brush_interactive::UIOptions::builder()
+///     .history_share(true)
+///     .build();
+/// assert!(options.history_share);
+///
+/// let options = brush_interactive::UIOptions {
+///     history_share: true,
+///     ..Default::default()
+/// };
+/// assert!(options.history_share);
+/// ```
 #[derive(Default, bon::Builder)]
 pub struct UIOptions {
     /// Whether to disable bracketed paste mode.
