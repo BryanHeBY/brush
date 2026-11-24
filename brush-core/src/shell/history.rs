@@ -2,7 +2,7 @@
 
 use std::{
     collections::BTreeSet,
-    io::{Seek, SeekFrom},
+    io::Read,
     path::{Path, PathBuf},
 };
 
@@ -104,6 +104,58 @@ fn has_quoted_newline(command: &str) -> bool {
     false
 }
 
+/// A cheap checksum of the last (up to) 256 bytes of `bytes`, used to notice that a file's
+/// prefix was replaced in place even when its size and inode did not change.
+fn tail_checksum(bytes: &[u8]) -> u64 {
+    let start = bytes.len().saturating_sub(256);
+    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+    for byte in &bytes[start..] {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100_0000_01b3);
+    }
+    hash
+}
+
+/// Splits `HISTIGNORE` on unescaped colons, removing the backslash that escapes a colon.
+fn split_ignore_patterns(ignore: &str) -> Vec<String> {
+    let mut patterns = Vec::new();
+    let mut current = String::new();
+    let mut characters = ignore.chars();
+
+    while let Some(character) = characters.next() {
+        match character {
+            '\\' => {
+                if let Some(next) = characters.next() {
+                    if next != ':' {
+                        current.push('\\');
+                    }
+                    current.push(next);
+                } else {
+                    current.push('\\');
+                }
+            }
+            ':' => patterns.push(std::mem::take(&mut current)),
+            _ => current.push(character),
+        }
+    }
+    patterns.push(current);
+    patterns
+}
+
+/// Returns the identity used to detect a replaced history file.
+fn history_file_identity(metadata: &std::fs::Metadata) -> super::HistoryFileId {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        (metadata.dev(), metadata.ino())
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = metadata;
+        ()
+    }
+}
+
 impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
     pub(super) fn load_history(&self) -> Result<Option<crate::history::History>, error::Error> {
         const MAX_FILE_SIZE_FOR_HISTORY_IMPORT: u64 = 1024 * 1024 * 1024; // 1 GiB
@@ -178,7 +230,7 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
             .and_then(crate::history::History::last)
             .map(|item| item.command_line.as_str());
 
-        for pattern in ignore.split(':') {
+        for pattern in split_ignore_patterns(&ignore) {
             if pattern.is_empty() {
                 continue;
             }
@@ -189,7 +241,7 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
                 continue;
             }
 
-            let pattern = patterns::Pattern::from(pattern)
+            let pattern = patterns::Pattern::from(pattern.as_str())
                 .set_extended_globbing(self.options.extended_globbing);
             if pattern.exactly_matches(command)? {
                 return Ok(true);
@@ -217,6 +269,10 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
     /// can contribute the entries another session wrote without re-importing the whole file.
     /// A file shorter than the recorded position was truncated or replaced; it is read from the
     /// beginning.
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "history offsets are file lengths, which fit in usize on supported targets"
+    )]
     pub fn read_history_file(
         &mut self,
         path: Option<&Path>,
@@ -230,33 +286,96 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
         };
 
         let mut file = std::fs::File::open(&path)?;
-        let length = file.metadata()?.len();
+        let metadata = file.metadata()?;
+        let file_id = Some(history_file_identity(&metadata));
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes)?;
+
+        let complete_end = bytes
+            .iter()
+            .rposition(|byte| *byte == b'\n')
+            .map_or(0, |index| index + 1);
+        let checksum_at = |offset: usize| tail_checksum(&bytes[..offset]);
 
         let offset = if new_only {
             match &self.history_read_position {
-                Some((position_path, position))
-                    if position_path == &path && *position <= length =>
+                Some((position_path, position, stored_id, stored_checksum))
+                    if position_path == &path
+                        && (*position as usize) <= complete_end
+                        && (stored_id.is_none() || stored_id == &file_id)
+                        && checksum_at(*position as usize) == *stored_checksum =>
                 {
-                    *position
+                    *position as usize
                 }
                 _ => 0,
             }
         } else {
             0
         };
-        file.seek(SeekFrom::Start(offset))?;
+        // Only import complete lines. A writer may be halfway through the last record; leave
+        // the position before it so the next read picks up the completed line.
+        if complete_end <= offset {
+            self.history_read_position = Some((path, offset as u64, file_id, checksum_at(offset)));
+            return Ok(());
+        }
 
         let size_limit = self.history_size_limit();
         let Some(history) = &mut self.history else {
             return Err(error::ErrorKind::HistoryNotEnabled.into());
         };
-        history.append_from(file)?;
+        history.append_from(&bytes[offset..complete_end])?;
         if let Some(limit) = size_limit {
             history.retain_last(limit);
         }
-        self.history_read_position = Some((path, length));
+        self.history_read_position = Some((
+            path,
+            complete_end as u64,
+            file_id,
+            checksum_at(complete_end),
+        ));
 
         Ok(())
+    }
+
+    /// Remembers where a startup import stopped, so a first `history -n` does not import the
+    /// entries the shell already loaded.
+    pub(super) fn remember_history_file_position(&mut self) {
+        let Some(path) = self.history_file_path() else {
+            return;
+        };
+        let Ok(metadata) = std::fs::metadata(&path) else {
+            return;
+        };
+        let file_id = Some(history_file_identity(&metadata));
+        let Ok(bytes) = std::fs::read(&path) else {
+            return;
+        };
+        let complete_end = bytes
+            .iter()
+            .rposition(|byte| *byte == b'\n')
+            .map_or(0, |index| index + 1);
+        self.history_read_position = Some((
+            path,
+            complete_end as u64,
+            file_id,
+            tail_checksum(&bytes[..complete_end]),
+        ));
+    }
+
+    /// Records that the complete history file was just written through `offset`.
+    fn remember_history_file_end(&mut self) {
+        let Some(path) = self.history_file_path() else {
+            return;
+        };
+        let Ok(metadata) = std::fs::metadata(&path) else {
+            return;
+        };
+        let file_id = Some(history_file_identity(&metadata));
+        let offset = metadata.len();
+        let checksum = std::fs::read(&path)
+            .map(|bytes| tail_checksum(&bytes))
+            .unwrap_or_default();
+        self.history_read_position = Some((path, offset, file_id, checksum));
     }
 
     /// Reads entries other sessions appended to the shell's history file since this session last
@@ -266,20 +385,10 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
         let Some(path) = self.history_file_path() else {
             return Ok(());
         };
-        let Ok(file) = std::fs::File::open(&path) else {
+        if !path.exists() {
             return Ok(());
-        };
-
-        let size_limit = self.history_size_limit();
-        let Some(history) = &mut self.history else {
-            return Err(error::ErrorKind::HistoryNotEnabled.into());
-        };
-        history.append_from_unique(file)?;
-        if let Some(limit) = size_limit {
-            history.retain_last(limit);
         }
-
-        Ok(())
+        self.read_history_file(Some(&path), true)
     }
 
     /// Appends the session's unsaved entries to the history file, regardless of `histappend`.
@@ -300,9 +409,7 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
                 )?;
             }
 
-            if let Ok(metadata) = std::fs::metadata(&history_file_path) {
-                self.history_read_position = Some((history_file_path, metadata.len()));
-            }
+            self.remember_history_file_end();
         }
 
         Ok(())
@@ -332,9 +439,7 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
 
             // Remember where this session's writes end, so share mode doesn't import them
             // again as if another shell had written them.
-            if let Ok(metadata) = std::fs::metadata(&history_file_path) {
-                self.history_read_position = Some((history_file_path, metadata.len()));
-            }
+            self.remember_history_file_end();
         }
 
         Ok(())

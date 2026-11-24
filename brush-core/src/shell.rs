@@ -49,6 +49,13 @@ pub use initscripts::{ProfileLoadBehavior, RcLoadBehavior};
 pub use readline::{ReadlineBellStyle, ReadlineOptions};
 pub use state::ShellState;
 
+/// Identity of the history file, used to detect replacement.
+#[cfg(unix)]
+pub(crate) type HistoryFileId = (u64, u64);
+/// Identity of the history file, used to detect replacement.
+#[cfg(not(unix))]
+pub(crate) type HistoryFileId = ();
+
 /// Represents an instance of a shell.
 ///
 /// # Type Parameters
@@ -169,7 +176,7 @@ pub struct Shell<SE: extensions::ShellExtensions = extensions::DefaultShellExten
 
     /// Byte offset already imported from the history file, for `history -n` and share mode.
     #[cfg_attr(feature = "serde", serde(skip))]
-    history_read_position: Option<(std::path::PathBuf, u64)>,
+    history_read_position: Option<(std::path::PathBuf, u64, Option<HistoryFileId>, u64)>,
 }
 
 impl<SE: extensions::ShellExtensions> Clone for Shell<SE> {

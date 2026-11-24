@@ -812,11 +812,14 @@ fn share_imports_other_sessions_commands() -> anyhow::Result<()> {
     first.expect_prompt().context("first prompt")?;
     second.expect_prompt().context("second prompt")?;
 
-    first.send_line("echo from-first-session")?;
-    first.expect("from-first-session")?;
+    first.send_line("echo duplicate-entry")?;
+    first.expect("duplicate-entry")?;
     first.expect_prompt().context("first command")?;
+    first.send_line("echo duplicate-entry")?;
+    first.expect("duplicate-entry")?;
+    first.expect_prompt().context("first repeat")?;
 
-    // Move the second shell through a prompt so share mode imports what the first wrote.
+    // Move the second shell through a prompt so share mode imports both executions.
     second.send_line(": share-sync")?;
     second.expect_prompt().context("second sync")?;
 
@@ -826,9 +829,32 @@ fn share_imports_other_sessions_commands() -> anyhow::Result<()> {
 
     let seen = std::fs::read_to_string(home.path().join("shared-history.txt"))
         .context("read shared history output")?;
-    assert!(
-        seen.contains("echo from-first-session"),
-        "shared history did not include the other session's command: {seen:?}"
+    assert_eq!(
+        seen.matches("echo duplicate-entry").count(),
+        2,
+        "share collapsed a legitimate duplicate: {seen:?}"
+    );
+
+    // Advancing again must not import the same entries a second time.
+    second.send_line(": share-sync-again")?;
+    second.expect_prompt().context("second sync again")?;
+    second.send_line("history > \"$HOME/shared-history-again.txt\"; echo SHARE-DONE")?;
+    second.expect("SHARE-DONE")?;
+    second.expect_prompt().context("second command again")?;
+    let seen_again = std::fs::read_to_string(home.path().join("shared-history-again.txt"))
+        .context("read second shared history output")?;
+    assert_eq!(
+        seen_again.matches("echo duplicate-entry").count(),
+        2,
+        "share re-imported the same entries: {seen_again:?}"
+    );
+    assert_eq!(
+        seen_again
+            .lines()
+            .filter(|line| line.ends_with(": share-sync"))
+            .count(),
+        1,
+        "share re-imported its own command: {seen_again:?}"
     );
 
     Ok(())
@@ -875,6 +901,10 @@ struct RawPty {
 }
 
 impl RawPty {
+    #[allow(
+        clippy::multiple_unsafe_ops_per_block,
+        reason = "the pre-exec hook and controlling-terminal ioctl are one setup step"
+    )]
     fn spawn(home: &std::path::Path) -> anyhow::Result<Self> {
         let pty = nix::pty::openpty(None, None)?;
         let slave = std::fs::File::from(pty.slave);
@@ -912,6 +942,7 @@ impl RawPty {
 
         // `openpty` does not set close-on-exec; without this the child would inherit a
         // duplicate of the master, so closing ours would not hang the terminal up.
+        // SAFETY: the descriptor is owned and valid here.
         unsafe {
             libc::fcntl(
                 std::os::fd::AsRawFd::as_raw_fd(&pty.master),
@@ -922,7 +953,9 @@ impl RawPty {
 
         let child = cmd.spawn()?;
         let master = std::fs::File::from(pty.master);
+        // SAFETY: the descriptor is owned and valid here.
         let flags = unsafe { libc::fcntl(std::os::fd::AsRawFd::as_raw_fd(&master), libc::F_GETFL) };
+        // SAFETY: the descriptor is owned and valid here.
         unsafe {
             libc::fcntl(
                 std::os::fd::AsRawFd::as_raw_fd(&master),
@@ -1087,6 +1120,133 @@ fn immediate_append_does_not_overwrite_other_sessions() -> anyhow::Result<()> {
             .get_process_mut()
             .kill(Signal::SIGKILL)?;
     }
+
+    Ok(())
+}
+
+/// A timestamped `lithist`-style entry keeps its embedded newlines when a new session
+/// reloads it. The first session adds the entry explicitly so the test does not depend on
+/// Reedline's multi-line cursor-position handshake.
+#[test]
+fn lithist_timestamped_entry_round_trips() -> anyhow::Result<()> {
+    let home = tempfile::tempdir()?;
+    let mut session = start_history_session(Some("basic"), None, home.path())?;
+    session.expect_prompt()?;
+    session.send_line("export HISTTIMEFORMAT='%s '")?;
+    session.expect_prompt()?;
+    session.send_line("history -s $'for x in 1; do\\n : inside-$x\\ndone'")?;
+    session.expect_prompt()?;
+    session.send_line("history -w")?;
+    session.expect_prompt()?;
+    session.exit()?;
+
+    let contents = read_history_file(home.path());
+    assert!(
+        contents.contains("for x in 1; do\n : inside-$x\ndone"),
+        "multi-line entry was split on write: {contents:?}"
+    );
+
+    let mut reopened = start_history_session(Some("basic"), None, home.path())?;
+    reopened.expect_prompt()?;
+    let seen = home.path().join("lithist-history.txt");
+    reopened.send_line(format!(
+        "history > {}; echo REOPEN-DONE",
+        brush_core::escape::single_quote(seen.to_str().context("lithist path")?)
+    ))?;
+    reopened.expect("REOPEN-DONE")?;
+    reopened.expect_prompt()?;
+    let history = std::fs::read_to_string(&seen)?;
+    assert!(
+        history.contains("for x in 1; do\n : inside-$x\ndone"),
+        "reloaded history split the entry: {history:?}"
+    );
+
+    Ok(())
+}
+
+/// The first `history -n` starts from where the startup import stopped, and later calls only
+/// import new complete records, even across replacement, truncation, and a partial last line.
+#[test]
+fn history_n_starts_after_startup_import() -> anyhow::Result<()> {
+    use std::io::Write as _;
+
+    let home = tempfile::tempdir()?;
+    let history_path = home.path().join("history");
+    std::fs::write(&history_path, "old-entry\n")?;
+
+    let mut session = start_history_session(Some("basic"), None, home.path())?;
+    session.expect_prompt()?;
+
+    let snapshot = |session: &mut RawShellSession, name: &str| -> anyhow::Result<String> {
+        let path = home.path().join(name);
+        session.send_line(format!(
+            "history > {}; echo SNAPSHOT-DONE",
+            brush_core::escape::single_quote(path.to_str().context("snapshot path")?)
+        ))?;
+        session.expect("SNAPSHOT-DONE")?;
+        session.expect_prompt()?;
+        Ok(std::fs::read_to_string(path)?)
+    };
+
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(&history_path)?
+        .write_all(b"new-entry\n")?;
+    session.send_line("history -n")?;
+    session.expect_prompt()?;
+    let first = snapshot(&mut session, "first.txt")?;
+    assert_eq!(first.matches("old-entry").count(), 1, "{first:?}");
+    assert_eq!(first.matches("new-entry").count(), 1, "{first:?}");
+
+    // A second read imports nothing.
+    session.send_line("history -n")?;
+    session.expect_prompt()?;
+    let second = snapshot(&mut session, "second.txt")?;
+    assert_eq!(second.matches("old-entry").count(), 1, "{second:?}");
+    assert_eq!(second.matches("new-entry").count(), 1, "{second:?}");
+
+    // Replacing the file, even at the same size, resets the cursor.
+    let replacement = home.path().join("replacement");
+    std::fs::write(&replacement, "replaced!!\n")?;
+    std::fs::rename(&replacement, &history_path)?;
+    session.send_line("history -n")?;
+    session.expect_prompt()?;
+    let replaced = snapshot(&mut session, "replaced.txt")?;
+    assert_eq!(replaced.matches("replaced!!").count(), 1, "{replaced:?}");
+
+    // A partial last record waits for its newline.
+    std::fs::write(&history_path, "unfinished-record")?;
+    session.send_line("history -n")?;
+    session.expect_prompt()?;
+    let partial = snapshot(&mut session, "partial.txt")?;
+    assert!(!partial.contains("unfinished-record"), "{partial:?}");
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(&history_path)?
+        .write_all(b"-done\n")?;
+    session.send_line("history -n")?;
+    session.expect_prompt()?;
+    let completed = snapshot(&mut session, "completed.txt")?;
+    assert_eq!(
+        completed.matches("unfinished-record-done").count(),
+        1,
+        "{completed:?}"
+    );
+
+    // An explicit path is read independently of the default file's cursor.
+    let other = home.path().join("other-history");
+    std::fs::write(&other, "other-entry\n")?;
+    session.send_line(format!(
+        "history -n {}",
+        brush_core::escape::single_quote(other.to_str().context("other path")?)
+    ))?;
+    session.expect_prompt()?;
+    let other_seen = snapshot(&mut session, "other.txt")?;
+    assert_eq!(
+        other_seen.matches("other-entry").count(),
+        1,
+        "{other_seen:?}"
+    );
 
     Ok(())
 }

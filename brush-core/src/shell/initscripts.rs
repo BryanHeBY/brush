@@ -70,6 +70,7 @@ impl<SE: extensions::ShellExtensions> Shell<SE> {
             && let Ok(Some(history)) = self.load_history()
         {
             self.history = Some(history);
+            self.remember_history_file_position();
         }
 
         Ok(())
