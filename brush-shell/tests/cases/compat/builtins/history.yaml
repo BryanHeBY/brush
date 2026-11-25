@@ -747,7 +747,8 @@ cases:
     args: ["-o", "history"]
     env:
       HISTFILE: "history-file.txt"
-      HISTTIMEFORMAT: "%s "
+      # The two shells may run on opposite sides of a wall-clock second.
+      HISTTIMEFORMAT: "[history] "
     stdin: |
       # a comment
       echo after
