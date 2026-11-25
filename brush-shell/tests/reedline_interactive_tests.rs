@@ -272,64 +272,88 @@ fn mark_directories_off_keeps_filename_escaping() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Terminal-control sequences must go to the controlling terminal, not into a redirected
-/// stdout. Herdr still needs its OSC 7 directory update.
-#[allow(
-    clippy::multiple_unsafe_ops_per_block,
-    reason = "pre-exec setup and optional controlling-terminal ioctl are one operation"
-)]
-fn set_test_controlling_terminal() -> std::io::Result<()> {
-    #[cfg(not(target_os = "macos"))]
-    let control = libc::TIOCSCTTY;
-    #[cfg(target_os = "macos")]
-    let control = libc::TIOCSCTTY.into();
+const HERDR_BRUSH_ARGS: [&str; 7] = [
+    "--norc",
+    "--noprofile",
+    "--no-config",
+    "--disable-bracketed-paste",
+    "--disable-color",
+    "--enable-terminal-integration",
+    "--input-backend=basic",
+];
 
-    // SAFETY: invoked after setsid in the test child, with the PTY slave on fd 0.
-    if unsafe { libc::ioctl(0, control, 0) } == 0 {
-        Ok(())
-    } else {
-        Err(std::io::Error::last_os_error())
-    }
+fn configure_herdr(cmd: &mut std::process::Command, home: &std::path::Path) {
+    cmd.env("PS1", PROMPT)
+        .env("TERM", "xterm-256color")
+        .env("TERM_PROGRAM", "herdr")
+        .env("HOME", home)
+        .env("HISTFILE", "");
 }
 
-fn herdr_with_redirected_stdout(controlling_terminal: bool) -> anyhow::Result<()> {
+fn check_herdr_redirected_output(output: &std::path::Path) -> anyhow::Result<()> {
+    let contents = std::fs::read_to_string(output)?;
+    assert_eq!(contents, "payload\n", "unexpected redirected stdout");
+    Ok(())
+}
+
+/// Terminal-control sequences must go to the controlling terminal, not into a redirected
+/// stdout. Use the same PTY runner as the other interactive tests and redirect in its child
+/// before handing that terminal to Brush.
+#[test]
+fn redirected_stdout_does_not_receive_herdr_osc7() -> anyhow::Result<()> {
+    let temp = tempfile::tempdir()?;
+    let output = temp.path().join("stdout.txt");
+    let mut cmd = std::process::Command::new("sh");
+    cmd.args([
+        "-c",
+        r#"PS1="$BRUSH_TEST_PROMPT" exec "$@" > "$BRUSH_TEST_STDOUT""#,
+        "brush-osc7-test",
+    ])
+    .arg(assert_cmd::cargo::cargo_bin!("brush"))
+    .args(HERDR_BRUSH_ARGS)
+    .env("BRUSH_TEST_STDOUT", &output)
+    .env("BRUSH_TEST_PROMPT", PROMPT);
+    configure_herdr(&mut cmd, temp.path());
+
+    let mut session = expectrl::Session::spawn(cmd)?;
+    session.set_expect_timeout(Some(Duration::from_secs(5)));
+    session
+        .expect("\x1b]7;file://")
+        .context("OSC 7 missing on the terminal")?;
+    session.expect(PROMPT).context("first prompt missing")?;
+    session.send_line("echo payload")?;
+    session
+        .expect("\x1b]7;file://")
+        .context("OSC 7 missing after command")?;
+    session
+        .expect(PROMPT)
+        .context("prompt missing after command")?;
+    check_herdr_redirected_output(&output)?;
+    session.send_line("exit")?;
+    session.expect(expectrl::Eof)?;
+    Ok(())
+}
+
+#[test]
+fn no_controlling_terminal_does_not_leak_herdr_osc7() -> anyhow::Result<()> {
     use nix::fcntl::{FcntlArg, OFlag, fcntl};
-    use std::io::Write as _;
     use std::os::unix::process::CommandExt as _;
 
     let temp = tempfile::tempdir()?;
     let output = temp.path().join("stdout.txt");
     let stdout = std::fs::File::create(&output)?;
-
     let pty = nix::pty::openpty(None, None)?;
     let slave = std::fs::File::from(pty.slave);
-    let shell_path = assert_cmd::cargo::cargo_bin!("brush");
-    let mut cmd = std::process::Command::new(shell_path);
-    cmd.args([
-        "--norc",
-        "--noprofile",
-        "--no-config",
-        "--disable-bracketed-paste",
-        "--disable-color",
-        "--enable-terminal-integration",
-        "--input-backend=basic",
-    ]);
-    cmd.stdin(std::process::Stdio::from(slave.try_clone()?));
-    cmd.stderr(std::process::Stdio::from(slave));
-    cmd.stdout(std::process::Stdio::from(stdout));
-    cmd.env("PS1", PROMPT);
-    cmd.env("TERM", "xterm-256color");
-    cmd.env("TERM_PROGRAM", "herdr");
-    cmd.env("HOME", temp.path());
-    cmd.env("HISTFILE", "");
-    // SAFETY: the pre-exec hook only calls async-signal-safe functions. When
-    // `controlling_terminal` is set it also makes the test PTY the controlling terminal.
+    let mut cmd = std::process::Command::new(assert_cmd::cargo::cargo_bin!("brush"));
+    cmd.args(HERDR_BRUSH_ARGS)
+        .stdin(std::process::Stdio::from(slave.try_clone()?))
+        .stderr(std::process::Stdio::from(slave))
+        .stdout(std::process::Stdio::from(stdout));
+    configure_herdr(&mut cmd, temp.path());
+    // SAFETY: setsid is async-signal-safe, and leaves the child without a controlling terminal.
     unsafe {
-        cmd.pre_exec(move || {
+        cmd.pre_exec(|| {
             nix::unistd::setsid()?;
-            if controlling_terminal {
-                set_test_controlling_terminal()?;
-            }
             Ok(())
         });
     }
@@ -338,75 +362,51 @@ fn herdr_with_redirected_stdout(controlling_terminal: bool) -> anyhow::Result<()
     fcntl(&master, FcntlArg::F_SETFL(flags | OFlag::O_NONBLOCK))
         .context("setting nonblocking mode on the PTY master")?;
     let mut child = cmd.spawn().context("spawning Brush under the test PTY")?;
+    let result = check_herdr_without_controlling_terminal(&mut master, &output);
+    let _ = child.kill();
+    let _ = child.wait();
+    result
+}
 
-    let read_available = |file: &mut std::fs::File, buffer: &mut Vec<u8>| {
-        let mut chunk = [0_u8; 4096];
-        match std::io::Read::read(file, &mut chunk) {
-            Ok(0) => {}
-            Ok(count) => buffer.extend_from_slice(&chunk[..count]),
-            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
-            Err(_) => {}
-        }
-    };
+fn check_herdr_without_controlling_terminal(
+    master: &mut std::fs::File,
+    output: &std::path::Path,
+) -> anyhow::Result<()> {
+    use std::io::{Read as _, Write as _};
 
     let mut terminal_bytes = Vec::new();
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     while std::time::Instant::now() < deadline {
-        read_available(&mut master, &mut terminal_bytes);
-        let text = String::from_utf8_lossy(&terminal_bytes);
-        if text.contains("\x1b]7;file://") && text.contains(PROMPT) {
+        let mut chunk = [0_u8; 4096];
+        match master.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(count) => terminal_bytes.extend_from_slice(&chunk[..count]),
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+            Err(error) => return Err(error.into()),
+        }
+        if String::from_utf8_lossy(&terminal_bytes).contains(PROMPT) {
             break;
         }
         std::thread::sleep(Duration::from_millis(20));
     }
     let terminal_text = String::from_utf8_lossy(&terminal_bytes);
-    if controlling_terminal {
-        assert!(
-            terminal_text.contains("\x1b]7;file://"),
-            "terminal did not receive OSC 7: {terminal_text:?}"
-        );
-    } else {
-        assert!(
-            !terminal_text.contains("\x1b]7;file://"),
-            "OSC 7 was sent without a controlling terminal: {terminal_text:?}"
-        );
-    }
     assert!(
         terminal_text.contains(PROMPT),
         "no prompt on the terminal: {terminal_text:?}"
     );
-
+    assert!(
+        !terminal_text.contains("\x1b]7;file://"),
+        "OSC 7 was sent without a controlling terminal: {terminal_text:?}"
+    );
     master.write_all(b"echo payload\n")?;
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     while std::time::Instant::now() < deadline {
-        if std::fs::read_to_string(&output).is_ok_and(|text| text.contains("payload")) {
+        if std::fs::read_to_string(output).is_ok_and(|text| text.contains("payload")) {
             break;
         }
         std::thread::sleep(Duration::from_millis(20));
     }
-    let contents = std::fs::read_to_string(&output)?;
-    assert!(
-        contents.contains("payload"),
-        "command output was not captured: {contents:?}"
-    );
-    assert!(
-        !contents.contains("\x1b]7;"),
-        "OSC 7 leaked into redirected stdout: {contents:?}"
-    );
-
-    let _ = child.kill();
-    let _ = child.wait();
-    Ok(())
-}
-
-#[test]
-fn redirected_stdout_does_not_receive_herdr_osc7() -> anyhow::Result<()> {
-    herdr_with_redirected_stdout(true)
-}
-
-#[test]
-fn no_controlling_terminal_does_not_leak_herdr_osc7() -> anyhow::Result<()> {
-    herdr_with_redirected_stdout(false)
+    check_herdr_redirected_output(output)
 }
 
 /// A command that reads stdin after the editor returns must receive keystrokes typed while
