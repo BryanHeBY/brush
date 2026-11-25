@@ -41,7 +41,7 @@ pub struct Config {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(default)]
 pub struct UiConfig {
-    /// Enable syntax highlighting in the input line.
+    /// Enable syntax highlighting in the input line (enabled by default).
     #[serde(rename = "syntax-highlighting")]
     pub syntax_highlighting: Option<bool>,
 
@@ -159,7 +159,7 @@ impl Config {
         let enable_highlighting = merge_bool_setting(
             args.enable_highlighting,
             defaults.enable_highlighting,
-            self.ui.syntax_highlighting,
+            self.ui.syntax_highlighting.or(Some(true)),
         );
         let terminal_shell_integration = merge_bool_setting(
             args.terminal_shell_integration,
@@ -492,10 +492,16 @@ mod tests {
 
         assert!(!ui.disable_bracketed_paste);
         assert!(!ui.disable_color);
-        // Note: whether highlighting is enabled by default depends on the compile-time
-        // DEFAULT_ENABLE_HIGHLIGHTING constant (true with reedline, false without)
+        assert!(!ui.disable_highlighting);
         assert!(!ui.terminal_shell_integration);
         assert!(!ui.zsh_style_hooks);
+    }
+
+    #[test]
+    fn to_ui_options_config_can_disable_highlighting() {
+        let config: Config = toml::from_str("[ui]\nsyntax-highlighting = false\n").unwrap();
+        let args = CommandLineArgs::default_values();
+        assert!(config.to_ui_options(&args).disable_highlighting);
     }
 
     #[test]

@@ -114,9 +114,6 @@ impl CommandLineArgs {
             });
         }
 
-        // Highlighting is always on in experimental builds.
-        this.enable_highlighting |= DEFAULT_ENABLE_HIGHLIGHTING;
-
         // Collect any args from after `--` (handled by try_parse_known) into
         // script_args, which become positional parameters ($0, $1, ...).
         if let Some(args) = script_args {
@@ -259,11 +256,6 @@ fn install_panic_handlers() {
         }));
     }
 }
-
-#[cfg(feature = "experimental")]
-pub(crate) const DEFAULT_ENABLE_HIGHLIGHTING: bool = true;
-#[cfg(not(feature = "experimental"))]
-pub(crate) const DEFAULT_ENABLE_HIGHLIGHTING: bool = false;
 
 /// Run the brush shell. Returns the exit code.
 ///

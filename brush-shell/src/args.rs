@@ -218,7 +218,7 @@ pub struct CommandLineArgs {
     #[arg(long = "disable-color", help_heading = "User interface options")]
     pub disable_color: bool,
 
-    /// Enable syntax highlighting in input (always on in `experimental` builds).
+    /// Enable input syntax highlighting even if disabled in configuration.
     #[arg(long = "enable-highlighting", help_heading = "User interface options")]
     pub enable_highlighting: bool,
 

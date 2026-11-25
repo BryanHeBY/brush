@@ -58,15 +58,13 @@ User interface settings.
 
 | Setting               | Type    | Default | CLI flag                | Description                                  |
 |-----------------------|---------|---------|-------------------------|----------------------------------------------|
-| `syntax-highlighting` | boolean | see below | `--enable-highlighting` | Enable syntax highlighting in the input line |
+| `syntax-highlighting` | boolean | `true` | `--enable-highlighting` | Enable syntax highlighting in the input line |
 | `italics` | boolean | `false` | | Allow italics in syntax highlighting and Reedline history suggestions |
 | `history-suggestion-navigation` | boolean | `false` | | Browse visible history suggestions with Up and Down and accept with Right in the `reedline` backend |
 | `history-navigation-dedup` | `"unique"`, `"adjacent"`, or `"bash"` | `"unique"` | | Duplicate handling for Up/Down history traversal and explicit prefix searches in Reedline |
 
-> The default value of `syntax-highlighting` depends on how `brush-shell`
-> was built: `true` when built with the `experimental` Cargo feature,
-> `false` otherwise. CLI flags take precedence over the configuration
-> file.
+Set `syntax-highlighting = false` to turn highlighting off. The
+`--enable-highlighting` flag overrides that setting for the current invocation.
 
 Syntax highlighting is supported by the `reedline` and `vt` input backends.
 The `--disable-color` flag also disables syntax highlighting.

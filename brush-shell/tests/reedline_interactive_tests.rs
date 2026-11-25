@@ -1109,6 +1109,29 @@ fn readline_history_edits_match_bash() -> anyhow::Result<()> {
 
 #[cfg(target_os = "linux")]
 #[test]
+fn reedline_highlights_by_default_unless_explicitly_disabled() -> anyhow::Result<()> {
+    for (config, expected) in [
+        ("", "\x1b[1;32mecho"),
+        ("[ui]\nsyntax-highlighting = false\n", "echo\x1b7"),
+    ] {
+        for_readline_shell_with_config("", Some(config), |shell| {
+            if shell.bash {
+                return Ok(());
+            }
+            shell.session.send("echo")?;
+            let frame = shell.capture(expected)?;
+            if config.contains("false") {
+                assert!(!frame.contains("\x1b[1;32m"), "{frame:?}");
+            }
+            shell.session.send("\x03")?;
+            shell.prompt()
+        })?;
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+#[test]
 fn reedline_italics_toggle_covers_options_and_history_suggestions() -> anyhow::Result<()> {
     for italics in [false, true] {
         let config = format!("[ui]\nsyntax-highlighting = true\nitalics = {italics}\n");

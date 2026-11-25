@@ -140,7 +140,7 @@
           "default": null
         },
         "syntax-highlighting": {
-          "description": "Enable syntax highlighting in the input line.",
+          "description": "Enable syntax highlighting in the input line (enabled by default).",
           "type": [
             "boolean",
             "null"
