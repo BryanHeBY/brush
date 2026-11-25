@@ -259,6 +259,7 @@ impl Buffer {
 
 struct HistorySearch {
     prefix: String,
+    prefix_search: bool,
     start_cursor: usize,
     id: i64,
     last: Buffer,
@@ -628,13 +629,20 @@ impl ReadlineSession {
     ) -> Option<Buffer> {
         self.cycle = None;
         self.last_completion = None;
-        let previous = self.history.take().filter(|search| search.last == *current);
         let backward = matches!(action, Action::HistoryBackward | Action::PreviousHistory);
         let plain = matches!(action, Action::PreviousHistory | Action::NextHistory);
-        let start_cursor = previous
-            .as_ref()
-            .map_or(current.cursor, |search| search.start_cursor);
-        let prefix = match &previous {
+        let previous = self.history.take().filter(|search| {
+            search.last == *current
+                || (!plain
+                    && search.prefix_search
+                    && !self.navigate_suggestions
+                    && !current.text.contains('\n')
+                    && !search.last.text.contains('\n'))
+        });
+        // An edit changes the query, not the history position it searches from.
+        let unchanged = previous.as_ref().filter(|search| search.last == *current);
+        let start_cursor = unchanged.map_or(current.cursor, |search| search.start_cursor);
+        let prefix = match unchanged {
             Some(search) => search.prefix.as_str(),
             None if plain => "",
             None => current.text.get(..current.cursor)?,
@@ -667,6 +675,7 @@ impl ReadlineSession {
             };
             self.history = Some(HistorySearch {
                 prefix: prefix.to_owned(),
+                prefix_search: !plain,
                 start_cursor,
                 id: item.id,
                 last: next.clone(),
@@ -674,7 +683,7 @@ impl ReadlineSession {
             return Some(next);
         }
 
-        if !backward && prefix.is_empty() {
+        if !backward && prefix.is_empty() && unchanged.is_some() {
             return Some(Buffer {
                 text: String::new(),
                 cursor: 0,

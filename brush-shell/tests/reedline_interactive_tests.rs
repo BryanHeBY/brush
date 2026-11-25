@@ -1146,6 +1146,54 @@ fn reedline_italics_toggle_covers_options_and_history_suggestions() -> anyhow::R
 
 #[cfg(target_os = "linux")]
 #[test]
+fn readline_prefix_history_edits_keep_the_recalled_entry_as_anchor() -> anyhow::Result<()> {
+    const UP: &str = "\x1b[A";
+    const DOWN: &str = "\x1b[B";
+    for_readline_shell_with_config(
+        r#"
+"\e[A": history-search-backward
+"\e[B": history-search-forward
+"#,
+        Some("[ui]\nhistory-suggestion-navigation = false\n"),
+        |shell| {
+            if shell.bash {
+                return Ok(());
+            }
+            // Use disjoint prefixes so accepting one case never seeds another.
+            for prefix in ["check-a-", "check-b-", "check-c-", "check-d-", "check-e-"] {
+                for suffix in ["branch-old", "broad-mid", "branch-new"] {
+                    let value = format!("{prefix}{suffix}");
+                    shell.run_and_expect(&format!("echo {value}"), &value)?;
+                }
+            }
+            // Unchanged queries keep their original prefix, skipping broad-mid.
+            shell.run_and_expect(&format!("echo check-a-bra{UP}{UP}"), "check-a-branch-old")?;
+            // An edited query starts before the recalled entry, not at the newest entry.
+            shell.run_and_expect(
+                &format!("echo check-b-bra{UP}\x7f\x7f{UP}"),
+                "check-b-broad-mid",
+            )?;
+            // A failed search keeps the edited text, cursor, and traversal anchor.
+            shell.run_and_expect(
+                &format!("echo check-c-bra{UP}\x7f\x7fX{UP}\x7f{UP}"),
+                "check-c-broad-mid",
+            )?;
+            // Moving point without changing text also recomputes the query.
+            shell.run_and_expect(
+                &format!("echo check-e-bra{UP}\x1b[D\x1b[D{UP}"),
+                "check-e-broad-mid",
+            )?;
+            // Down moves toward newer entries with the updated query.
+            shell.run_and_expect(
+                &format!("echo check-d-bra{UP}\x1b[D\x1b[D{UP}{DOWN}"),
+                "check-d-branch-new",
+            )
+        },
+    )
+}
+
+#[cfg(target_os = "linux")]
+#[test]
 fn readline_history_arrows_keep_suggestions_separate() -> anyhow::Result<()> {
     const HINT: &str = "\x1b[2m";
     for_readline_shell_with_config(
