@@ -8,6 +8,10 @@ use crate::error;
 
 pub use std::os::unix::fs::MetadataExt;
 
+#[cfg(target_os = "android")]
+// _PATH_DEFPATH in https://android.googlesource.com/platform/bionic/+/refs/heads/main/libc/include/paths.h
+const ANDROID_DEFPATH: &str = "/product/bin:/apex/com.android.runtime/bin:/apex/com.android.art/bin:/apex/com.android.virt/bin:/system_ext/bin:/system/bin:/system/xbin:/odm/bin:/vendor/bin:/vendor/xbin";
+
 /// Creates a new file with private (0600) permissions.
 pub fn create_new_private_file(path: &std::path::Path) -> std::io::Result<std::fs::File> {
     use std::os::unix::fs::OpenOptionsExt as _;

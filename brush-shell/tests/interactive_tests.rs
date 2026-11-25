@@ -933,7 +933,11 @@ impl RawPty {
         unsafe {
             cmd.pre_exec(|| {
                 nix::unistd::setsid()?;
-                if libc::ioctl(0, libc::TIOCSCTTY, 0) != 0 {
+                #[cfg(not(target_os = "macos"))]
+                let control = libc::TIOCSCTTY;
+                #[cfg(target_os = "macos")]
+                let control = libc::TIOCSCTTY.into();
+                if libc::ioctl(0, control, 0) != 0 {
                     return Err(std::io::Error::last_os_error());
                 }
                 Ok(())
