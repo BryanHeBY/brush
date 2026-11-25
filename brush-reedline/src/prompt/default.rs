@@ -169,9 +169,9 @@ fn format_working_dir(cwd: &std::path::Path, home: Option<&std::path::Path>) -> 
 #[cfg(test)]
 mod tests {
     use super::{
-        format_working_dir, DefaultPrompt, DefaultPromptSegment, DEFAULT_INSERT_PROMPT_INDICATOR,
-        DEFAULT_MULTILINE_INDICATOR, DEFAULT_NORMAL_PROMPT_INDICATOR, DEFAULT_PROMPT_INDICATOR,
-        DEFAULT_SELECT_PROMPT_INDICATOR,
+        DEFAULT_INSERT_PROMPT_INDICATOR, DEFAULT_MULTILINE_INDICATOR,
+        DEFAULT_NORMAL_PROMPT_INDICATOR, DEFAULT_PROMPT_INDICATOR, DEFAULT_SELECT_PROMPT_INDICATOR,
+        DefaultPrompt, DefaultPromptSegment, format_working_dir,
     };
     use crate::{Prompt, PromptEditMode, PromptHelixMode, PromptViMode};
     use rstest::rstest;

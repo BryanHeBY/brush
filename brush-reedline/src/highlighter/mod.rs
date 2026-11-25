@@ -1,7 +1,7 @@
 mod example;
 mod simple_match;
 
-use crate::{auto_pairs::AutoPairContext, StyledText};
+use crate::{StyledText, auto_pairs::AutoPairContext};
 
 pub use example::ExampleHighlighter;
 pub use simple_match::SimpleMatchHighlighter;

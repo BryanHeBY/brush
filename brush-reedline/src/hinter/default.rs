@@ -1,4 +1,4 @@
-use crate::{hinter::get_first_token, history::SearchQuery, Hinter, History};
+use crate::{Hinter, History, hinter::get_first_token, history::SearchQuery};
 use nu_ansi_term::{Color, Style};
 
 /// A hinter that uses the completions or the history to show a hint to the user
@@ -88,9 +88,9 @@ mod tests {
     use rstest::rstest;
 
     use crate::{
+        Result,
         history::{FileBackedHistory, HistoryItem, HistoryItemId, HistorySessionId, SearchQuery},
         result::{ReedlineError, ReedlineErrorVariants},
-        Result,
     };
 
     /// A backend whose every call fails, standing in for a locked or unreadable database.

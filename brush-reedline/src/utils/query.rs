@@ -1,6 +1,6 @@
 use crate::{
-    default_emacs_keybindings, default_vi_insert_keybindings, default_vi_normal_keybindings,
-    Keybindings,
+    Keybindings, default_emacs_keybindings, default_vi_insert_keybindings,
+    default_vi_normal_keybindings,
 };
 use crossterm::event::KeyCode;
 use std::fmt::{Display, Formatter};
@@ -230,11 +230,13 @@ mod tests {
     #[test]
     fn emacs_ctrl_c_is_listed_as_strings() {
         let bindings = get_reedline_default_keybindings();
-        assert!(bindings
-            .iter()
-            .any(|(mode, modifier, key, event)| mode == "emacs"
-                && modifier == "KeyModifiers(CONTROL)"
-                && key == "Char('c')"
-                && event == "CtrlC"));
+        assert!(
+            bindings
+                .iter()
+                .any(|(mode, modifier, key, event)| mode == "emacs"
+                    && modifier == "KeyModifiers(CONTROL)"
+                    && key == "Char('c')"
+                    && event == "CtrlC")
+        );
     }
 }

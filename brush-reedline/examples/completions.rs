@@ -5,8 +5,9 @@
 // [Enter] to select the chosen alternative
 
 use reedline::{
-    default_emacs_keybindings, ColumnarMenu, DefaultCompleter, DefaultPrompt, EditCommand, Emacs,
-    KeyCode, KeyModifiers, Keybindings, MenuBuilder, Reedline, ReedlineEvent, ReedlineMenu, Signal,
+    ColumnarMenu, DefaultCompleter, DefaultPrompt, EditCommand, Emacs, KeyCode, KeyModifiers,
+    Keybindings, MenuBuilder, Reedline, ReedlineEvent, ReedlineMenu, Signal,
+    default_emacs_keybindings,
 };
 use std::io;
 

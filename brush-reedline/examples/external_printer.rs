@@ -22,9 +22,11 @@ fn main() {
         let mut i = 1;
         loop {
             sleep(Duration::from_secs(1));
-            assert!(p_sender_slow
-                .send(format!("Message {i} delivered.\nWith two lines!"))
-                .is_ok());
+            assert!(
+                p_sender_slow
+                    .send(format!("Message {i} delivered.\nWith two lines!"))
+                    .is_ok()
+            );
             i += 1;
         }
     });

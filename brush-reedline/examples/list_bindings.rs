@@ -1,6 +1,6 @@
 use reedline::{
-    get_reedline_default_keybindings, get_reedline_keybinding_modifiers, get_reedline_keycodes,
     EditCommandDiscriminants, PromptEditModeDiscriminants, ReedlineEventDiscriminants,
+    get_reedline_default_keybindings, get_reedline_keybinding_modifiers, get_reedline_keycodes,
 };
 use strum::IntoEnumIterator;
 

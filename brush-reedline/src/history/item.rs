@@ -1,6 +1,6 @@
 #[cfg(feature = "_sqlite")]
 use rusqlite::ToSql;
-use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::{
     fmt::Display,
     time::{Duration, SystemTime, UNIX_EPOCH},

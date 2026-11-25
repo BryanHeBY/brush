@@ -8,8 +8,8 @@ mod utils;
 pub(crate) use painter::CursorPositionQuery;
 pub use painter::{Painter, PainterSuspendedState, RenderSnapshot, TerminalTakenSignal, W};
 pub(crate) use prompt_lines::PromptLines;
-pub(crate) use styled_text::continue_hint_lines;
 pub use styled_text::StyledText;
+pub(crate) use styled_text::continue_hint_lines;
 pub(crate) use utils::{
     escape_control, escape_control_keep_sgr, estimate_single_line_wraps, line_width, sgr_len,
 };

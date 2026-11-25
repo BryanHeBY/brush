@@ -1,6 +1,6 @@
 use super::HistoryItemId;
 use crate::{
-    core_editor::LineBuffer, history::HistoryTimestamp, HistoryItem, HistorySessionId, Result,
+    HistoryItem, HistorySessionId, Result, core_editor::LineBuffer, history::HistoryTimestamp,
 };
 
 /// Browsing modes for a [`History`]
@@ -247,8 +247,8 @@ pub trait History: Send {
 mod test {
     use rstest::rstest;
 
-    use crate::history::TestBackend;
     use crate::HistorySessionId;
+    use crate::history::TestBackend;
 
     fn create_item(session: i64, cwd: &str, cmd: &str, exit_status: i64) -> HistoryItem {
         HistoryItem {

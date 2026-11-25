@@ -4,8 +4,8 @@
 // Pressing keys will increase the right prompt value
 
 use reedline::{
-    Prompt, PromptEditMode, PromptHistorySearch, PromptHistorySearchStatus, Reedline, Signal,
-    DEFAULT_MULTILINE_INDICATOR,
+    DEFAULT_MULTILINE_INDICATOR, Prompt, PromptEditMode, PromptHistorySearch,
+    PromptHistorySearchStatus, Reedline, Signal,
 };
 use std::{borrow::Cow, cell::Cell, io};
 
@@ -17,9 +17,7 @@ use std::{borrow::Cow, cell::Cell, io};
 pub struct CustomPrompt(Cell<u32>, &'static str);
 impl Prompt for CustomPrompt {
     fn render_prompt_left(&self) -> Cow<'_, str> {
-        {
-            Cow::Owned(self.1.to_string())
-        }
+        { Cow::Owned(self.1.to_string()) }
     }
 
     fn render_prompt_right(&self) -> Cow<'_, str> {

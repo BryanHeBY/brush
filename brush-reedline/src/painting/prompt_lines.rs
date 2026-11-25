@@ -3,9 +3,9 @@ use super::utils::{
     line_width, resolve_wrap, wrap_position,
 };
 use crate::{
+    Prompt, PromptHistorySearch,
     menu::{Menu, ReedlineMenu},
     prompt::PromptEditMode,
-    Prompt, PromptHistorySearch,
 };
 use std::borrow::Cow;
 

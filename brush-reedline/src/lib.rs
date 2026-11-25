@@ -291,29 +291,29 @@ mod history;
 #[cfg(feature = "_sqlite")]
 pub use history::SqliteBackedHistory;
 pub use history::{
-    CommandLineSearch, FileBackedHistory, History, HistoryItem, HistoryItemExtraInfo,
+    CommandLineSearch, FileBackedHistory, HISTORY_SIZE, History, HistoryItem, HistoryItemExtraInfo,
     HistoryItemId, HistoryNavigationQuery, HistorySessionId, HistoryTimestamp, IgnoreAllExtraInfo,
-    JsonFilterValue, SearchDirection, SearchFilter, SearchQuery, HISTORY_SIZE,
+    JsonFilterValue, SearchDirection, SearchFilter, SearchQuery,
 };
 
 mod prompt;
 pub use prompt::PromptHelixMode;
 pub use prompt::{
+    DEFAULT_INDICATOR_COLOR, DEFAULT_INSERT_PROMPT_INDICATOR, DEFAULT_MULTILINE_INDICATOR,
+    DEFAULT_NORMAL_PROMPT_INDICATOR, DEFAULT_PROMPT_COLOR, DEFAULT_PROMPT_INDICATOR,
+    DEFAULT_PROMPT_MULTILINE_COLOR, DEFAULT_PROMPT_RIGHT_COLOR, DEFAULT_SELECT_PROMPT_INDICATOR,
     DefaultPrompt, DefaultPromptSegment, Prompt, PromptEditMode, PromptEditModeDiscriminants,
-    PromptHistorySearch, PromptHistorySearchStatus, PromptViMode, DEFAULT_INDICATOR_COLOR,
-    DEFAULT_INSERT_PROMPT_INDICATOR, DEFAULT_MULTILINE_INDICATOR, DEFAULT_NORMAL_PROMPT_INDICATOR,
-    DEFAULT_PROMPT_COLOR, DEFAULT_PROMPT_INDICATOR, DEFAULT_PROMPT_MULTILINE_COLOR,
-    DEFAULT_PROMPT_RIGHT_COLOR, DEFAULT_SELECT_PROMPT_INDICATOR,
+    PromptHistorySearch, PromptHistorySearchStatus, PromptViMode,
 };
 
 mod edit_mode;
 pub use edit_mode::{
-    default_emacs_keybindings, default_vi_insert_keybindings, default_vi_normal_keybindings,
-    default_vi_visual_keybindings, CursorConfig, EditMode, Emacs, Keybindings, Vi,
+    CursorConfig, EditMode, Emacs, Keybindings, Vi, default_emacs_keybindings,
+    default_vi_insert_keybindings, default_vi_normal_keybindings, default_vi_visual_keybindings,
 };
 pub use edit_mode::{
-    default_helix_insert_keybindings, default_helix_normal_keybindings,
-    default_helix_select_keybindings, Helix,
+    Helix, default_helix_insert_keybindings, default_helix_normal_keybindings,
+    default_helix_select_keybindings,
 };
 
 mod highlighter;
@@ -337,9 +337,9 @@ pub use status_line::StatusLine;
 
 mod menu;
 pub use menu::{
-    menu_functions, ColumnarMenu, DescriptionMenu, DescriptionMode, DescriptionPosition, IdeMenu,
-    InputMode, ListMenu, Menu, MenuBuilder, MenuEvent, MenuSettings, MenuTextStyle, OutputMode,
-    ReedlineMenu, TraversalDirection,
+    ColumnarMenu, DescriptionMenu, DescriptionMode, DescriptionPosition, IdeMenu, InputMode,
+    ListMenu, Menu, MenuBuilder, MenuEvent, MenuSettings, MenuTextStyle, OutputMode, ReedlineMenu,
+    TraversalDirection, menu_functions,
 };
 
 mod terminal_extensions;

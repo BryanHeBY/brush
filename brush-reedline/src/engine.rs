@@ -8,14 +8,18 @@ use std::{
 
 use nu_ansi_term::{Color, Style};
 
-use crate::{enums::ReedlineRawEvent, external_printer::ExternalOutput, CursorConfig};
+use crate::{CursorConfig, enums::ReedlineRawEvent, external_printer::ExternalOutput};
 #[cfg(feature = "bashisms")]
 use crate::{
     history::SearchFilter,
-    menu_functions::{parse_selection_char, ParseAction},
+    menu_functions::{ParseAction, parse_selection_char},
 };
 use {
     crate::{
+        AbbrExpandContext, AutoPairAction, AutoPairContext, AutoPairs, EditCommand,
+        ExampleHighlighter, Highlighter, LineBuffer, Menu, MenuEvent, MouseButton, Prompt,
+        PromptHistorySearch, ReedlineMenu, Signal, StatusLine, UndoBehavior, ValidationResult,
+        Validator,
         completion::{Completer, CompletionOrigin, CompletionStatus, DefaultCompleter},
         core_editor::{EditCommandStatus, Editor},
         edit_mode::{EditMode, Emacs},
@@ -27,8 +31,8 @@ use {
             HistoryNavigationQuery, HistorySessionId, SearchDirection, SearchQuery,
         },
         painting::{
-            continue_hint_lines, escape_control, escape_control_keep_sgr, CursorPositionQuery,
-            Painter, PainterSuspendedState, PromptLines, RenderSnapshot, TerminalTakenSignal, W,
+            CursorPositionQuery, Painter, PainterSuspendedState, PromptLines, RenderSnapshot,
+            TerminalTakenSignal, W, continue_hint_lines, escape_control, escape_control_keep_sgr,
         },
         prompt::{PromptEditMode, PromptHistorySearchStatus},
         result::{ReedlineError, ReedlineErrorVariants},
@@ -40,16 +44,13 @@ use {
             tty_mode::TtyModeGuard,
         },
         utils::text_manipulation,
-        AbbrExpandContext, AutoPairAction, AutoPairContext, AutoPairs, EditCommand,
-        ExampleHighlighter, Highlighter, LineBuffer, Menu, MenuEvent, MouseButton, Prompt,
-        PromptHistorySearch, ReedlineMenu, Signal, StatusLine, UndoBehavior, ValidationResult,
-        Validator,
     },
     crossterm::{
+        QueueableCommand,
         cursor::SetCursorStyle,
         event,
         event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
-        terminal, QueueableCommand,
+        terminal,
     },
     std::{
         fs::File,
@@ -58,8 +59,8 @@ use {
         io::Write,
         process::Command,
         sync::{
-            atomic::{fence, AtomicBool, Ordering},
             Arc,
+            atomic::{AtomicBool, Ordering, fence},
         },
         time::Duration,
         time::SystemTime,
@@ -4885,7 +4886,11 @@ mod tests {
         // of that same quote kind, so it must close it literally instead.
         rl.run_edit_commands(&[EditCommand::InsertChar('"')]);
         assert_eq!(rl.editor.get_buffer(), "\"\"");
-        assert_eq!(rl.editor.insertion_point(), 2, "literal insert advances past the closing quote, unlike a paired insert which would leave the cursor at 1");
+        assert_eq!(
+            rl.editor.insertion_point(),
+            2,
+            "literal insert advances past the closing quote, unlike a paired insert which would leave the cursor at 1"
+        );
     }
 
     // --- undo granularity across all six action x veto combinations --------
@@ -6311,8 +6316,8 @@ mod tests {
 
     #[test]
     fn thread_safe_with_idle_callback() {
-        use std::sync::atomic::{AtomicUsize, Ordering};
         use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
 
         fn f<S: Send>(_: S) {}
 
@@ -7661,8 +7666,8 @@ mod tests {
     fn repaint_signal_is_independent_of_break_signal() {
         // The two out-of-band triggers must not interfere: arming a repaint
         // request must not be mistaken for a break, and vice versa.
-        use std::sync::atomic::AtomicBool;
         use std::sync::Arc;
+        use std::sync::atomic::AtomicBool;
 
         let mut reedline = Reedline::create().with_break_signal(Arc::new(AtomicBool::new(false)));
         let repaint = reedline.repaint_signal();
@@ -8835,8 +8840,8 @@ mod tests {
     /// the completer to refilter it: the answer would be thrown away.
     #[test]
     fn the_completer_is_not_asked_about_a_word_that_has_ended() {
-        use std::sync::atomic::{AtomicUsize, Ordering};
         use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
 
         let calls = Arc::new(AtomicUsize::new(0));
         let completion_menu = ReedlineMenu::EngineCompleter(Box::new(

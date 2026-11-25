@@ -1,4 +1,4 @@
-use super::{motion::Motion, parser::ReedlineOption, ViMode};
+use super::{ViMode, motion::Motion, parser::ReedlineOption};
 use crate::enums::{
     TextObject, TextObjectBracket, TextObjectQuote, TextObjectScope, TextObjectType,
 };

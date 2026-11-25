@@ -3,8 +3,8 @@
 // `MoveWordRightEnd` is still defined here.
 #![allow(deprecated)]
 
-use crate::core_editor::EditCommandStatus;
 use crate::PromptEditMode;
+use crate::core_editor::EditCommandStatus;
 use crossterm::event::{Event, KeyEvent, KeyEventKind};
 use serde::{Deserialize, Serialize};
 use strum::{EnumDiscriminants, EnumIter, EnumString, VariantArray};

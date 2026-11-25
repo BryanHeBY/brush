@@ -1,16 +1,16 @@
 use super::{
-    base::{CommandLineSearch, JsonFilterValue, SearchDirection, SearchQuery},
     History, HistoryItem, HistoryItemExtraInfo, HistoryItemId, HistorySessionId,
     IgnoreAllExtraInfo,
+    base::{CommandLineSearch, JsonFilterValue, SearchDirection, SearchQuery},
 };
 use crate::{
+    Result,
     history::HistoryTimestamp,
     result::{ReedlineError, ReedlineErrorVariants},
-    Result,
 };
 use rusqlite::{
-    named_params, params, params_from_iter, types::Value, Connection, ErrorCode, OpenFlags, ToSql,
-    TransactionBehavior,
+    Connection, ErrorCode, OpenFlags, ToSql, TransactionBehavior, named_params, params,
+    params_from_iter, types::Value,
 };
 use std::{
     path::{Path, PathBuf},

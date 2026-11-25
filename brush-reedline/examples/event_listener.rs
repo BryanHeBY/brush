@@ -1,10 +1,10 @@
 use {
     crossterm::{
-        event::{poll, Event, KeyCode, KeyEvent},
+        event::{Event, KeyCode, KeyEvent, poll},
         terminal,
     },
     std::{
-        io::{stdout, Write},
+        io::{Write, stdout},
         time::Duration,
     },
 };

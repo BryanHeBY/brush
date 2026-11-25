@@ -44,7 +44,7 @@ impl TtyModeGuard {
 #[cfg(unix)]
 impl Drop for TtyModeGuard {
     fn drop(&mut self) {
-        use rustix::termios::{tcsetattr, OptionalActions};
+        use rustix::termios::{OptionalActions, tcsetattr};
         let _ = tcsetattr(&self.tty, OptionalActions::Now, &self.termios);
     }
 }

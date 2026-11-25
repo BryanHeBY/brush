@@ -2,8 +2,8 @@
 //! [`TestScreen`], rather than on the bytes the painter emits.
 
 use super::*;
-use crate::painting::test_screen::TestScreen;
 use crate::PromptHistorySearch;
+use crate::painting::test_screen::TestScreen;
 use pretty_assertions::assert_eq;
 use std::borrow::Cow;
 

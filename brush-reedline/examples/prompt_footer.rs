@@ -9,9 +9,9 @@
 
 use nu_ansi_term::{Color, Style};
 use reedline::{
-    default_emacs_keybindings, ColumnarMenu, DefaultCompleter, DefaultPrompt, Emacs, KeyCode,
-    KeyModifiers, MenuBuilder, Prompt, PromptEditMode, PromptHistorySearch, Reedline,
-    ReedlineEvent, ReedlineMenu, Signal,
+    ColumnarMenu, DefaultCompleter, DefaultPrompt, Emacs, KeyCode, KeyModifiers, MenuBuilder,
+    Prompt, PromptEditMode, PromptHistorySearch, Reedline, ReedlineEvent, ReedlineMenu, Signal,
+    default_emacs_keybindings,
 };
 use std::{borrow::Cow, io};
 

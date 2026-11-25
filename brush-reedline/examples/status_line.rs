@@ -12,8 +12,8 @@
 
 use nu_ansi_term::{Color, Style};
 use reedline::{
-    default_emacs_keybindings, ColumnarMenu, DefaultCompleter, DefaultPrompt, Emacs, KeyCode,
-    KeyModifiers, MenuBuilder, Reedline, ReedlineEvent, ReedlineMenu, Signal, StatusLine,
+    ColumnarMenu, DefaultCompleter, DefaultPrompt, Emacs, KeyCode, KeyModifiers, MenuBuilder,
+    Reedline, ReedlineEvent, ReedlineMenu, Signal, StatusLine, default_emacs_keybindings,
 };
 use std::io;
 use unicode_width::UnicodeWidthChar;

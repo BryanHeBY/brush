@@ -1,8 +1,8 @@
 use std::{collections::HashSet, ops::Deref};
 
 use crate::{
-    history::SearchQuery, menu_functions::parse_selection_char, Completer, CompletionResult,
-    History, HistoryItem, Result, Span, Suggestion,
+    Completer, CompletionResult, History, HistoryItem, Result, Span, Suggestion,
+    history::SearchQuery, menu_functions::parse_selection_char,
 };
 
 const SELECTION_CHAR: char = '!';

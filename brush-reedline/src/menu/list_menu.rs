@@ -1,10 +1,10 @@
 use {
-    super::{menu_functions::parse_selection_char, Menu, MenuBuilder, MenuEvent, MenuSettings},
+    super::{Menu, MenuBuilder, MenuEvent, MenuSettings, menu_functions::parse_selection_char},
     crate::{
+        Completer, Suggestion, Suggestions,
         core_editor::Editor,
         menu_functions::{escape_suggestions, replace_in_buffer, resolve_completer_input},
-        painting::{estimate_single_line_wraps, Painter},
-        Completer, Suggestion, Suggestions,
+        painting::{Painter, estimate_single_line_wraps},
     },
     nu_ansi_term::ansi::RESET,
     std::{fmt::Write, iter::Sum},
@@ -726,7 +726,7 @@ fn count_digits(mut n: usize) -> u16 {
 
 #[cfg(test)]
 mod tests {
-    use crate::{painting::W, CompletionResult, Span};
+    use crate::{CompletionResult, Span, painting::W};
 
     use super::*;
     use rstest::rstest;
@@ -1023,9 +1023,10 @@ mod tests {
             walk(&mut menu, || MenuEvent::NextElement, 4),
             ["b", "c", "d", "e"]
         );
-        assert!(menu
-            .menu_string(5, false)
-            .starts_with("4: >E\r\nPage 3: records 4 - 4  total: 5"));
+        assert!(
+            menu.menu_string(5, false)
+                .starts_with("4: >E\r\nPage 3: records 4 - 4  total: 5")
+        );
     }
 
     #[test]

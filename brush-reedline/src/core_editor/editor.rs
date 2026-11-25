@@ -1,18 +1,18 @@
 use super::{
-    edit_stack::EditStack, CaretGeometry, Clipboard, Cursor, LineBuffer, Movement, SelectionExtent,
+    CaretGeometry, Clipboard, Cursor, LineBuffer, Movement, SelectionExtent, edit_stack::EditStack,
 };
 #[cfg(feature = "system_clipboard")]
 use crate::core_editor::get_system_clipboard;
 use crate::core_editor::graphemes::{next_grapheme_boundary, prev_grapheme_boundary};
 use crate::core_editor::resolve::resolve_selection;
-use crate::core_editor::{commit, line, operator_span, resolve_motion, RestPolicy};
+use crate::core_editor::{RestPolicy, commit, line, operator_span, resolve_motion};
 use crate::enums::{
     EditType, TextObject, TextObjectBracket, TextObjectQuote, TextObjectScope, TextObjectType,
     UndoBehavior,
 };
 use crate::prompt::PromptEditMode;
-use crate::{core_editor::get_local_clipboard, EditCommand};
 use crate::{Direction, Granularity, MotionTarget, WordEdge, WordKind};
+use crate::{EditCommand, core_editor::get_local_clipboard};
 use std::cmp::{max, min};
 use std::ops::{DerefMut, Range};
 
@@ -3597,8 +3597,8 @@ mod test {
         // anchor-stays-at-4 + query-time `+1`. The selected span is unchanged.
         assert_eq!(editor.line_buffer().selection_anchor(), Some(5));
         assert_eq!(editor.insertion_point(), 1); // cursor at position 1 ('h')
-                                                 // In Vi normal mode, selection should be inclusive from cursor to anchor+1
-                                                 // So it should select from position 1 to 5 (inclusive of char at position 4)
+        // In Vi normal mode, selection should be inclusive from cursor to anchor+1
+        // So it should select from position 1 to 5 (inclusive of char at position 4)
         assert_eq!(editor.get_selection(), Some((1, 5)));
     }
 

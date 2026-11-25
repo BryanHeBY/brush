@@ -13,8 +13,8 @@ use reedline::{DefaultPrompt, Reedline, Signal};
 use std::{
     io,
     sync::{
-        atomic::{AtomicBool, Ordering},
         Arc,
+        atomic::{AtomicBool, Ordering},
     },
     thread,
     time::Duration,
@@ -28,9 +28,11 @@ fn main() -> io::Result<()> {
 
     // Spawn a thread that triggers the break signal periodically
     let signal = break_signal.clone();
-    thread::spawn(move || loop {
-        thread::sleep(Duration::from_secs(5));
-        signal.store(true, Ordering::Relaxed);
+    thread::spawn(move || {
+        loop {
+            thread::sleep(Duration::from_secs(5));
+            signal.store(true, Ordering::Relaxed);
+        }
     });
 
     println!("Type something. The break signal fires every 5 seconds.");

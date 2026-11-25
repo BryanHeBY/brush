@@ -2,15 +2,15 @@
 use std::borrow::Cow;
 use std::ops::Range;
 
-use nu_ansi_term::{ansi::RESET, Style};
+use nu_ansi_term::{Style, ansi::RESET};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
 use crate::{
-    menu::{InputMode, MenuSettings, OutputMode},
-    painting::{escape_control, escape_control_keep_sgr, sgr_len, Painter},
     CompletionOrigin, CompletionResult, Editor, Partial, Span, Suggestion, Suggestions,
     UndoBehavior,
+    menu::{InputMode, MenuSettings, OutputMode},
+    painting::{Painter, escape_control, escape_control_keep_sgr, sgr_len},
 };
 
 /// Appended to whatever `truncate_with_ansi` keeps, so callers must allow at
@@ -1166,7 +1166,7 @@ mod tests {
         #[case] buffer: &str,
         #[case] expected: &str,
     ) {
-        use crate::{menu::MenuSettings, Completer, DefaultCompleter};
+        use crate::{Completer, DefaultCompleter, menu::MenuSettings};
 
         let mut completer = DefaultCompleter::default();
         completer.insert(vec![expected.to_string()]);

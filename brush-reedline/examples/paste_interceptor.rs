@@ -31,8 +31,8 @@
 // Abort with Ctrl-C or Ctrl-D.
 
 use reedline::{
-    default_emacs_keybindings, DefaultPrompt, EditCommand, Emacs, KeyCode, KeyModifiers,
-    Keybindings, PasteAction, PasteInterceptor, Reedline, ReedlineEvent, Signal,
+    DefaultPrompt, EditCommand, Emacs, KeyCode, KeyModifiers, Keybindings, PasteAction,
+    PasteInterceptor, Reedline, ReedlineEvent, Signal, default_emacs_keybindings,
 };
 use std::io;
 use std::sync::{Arc, Mutex};

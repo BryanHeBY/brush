@@ -11,22 +11,22 @@ use {
         line_width, plain_menu_text, resolve_wrap, sgr_len, wrap_position,
     },
     crate::{
+        Prompt,
         menu::{Menu, ReedlineMenu},
         painting::PromptLines,
         utils::environment::{term_is_dumb, var_os},
-        Prompt,
     },
     crossterm::{
+        QueueableCommand,
         cursor::{self, MoveTo, RestorePosition, SavePosition},
         style::{Attribute, Print, ResetColor, SetAttribute},
         terminal::{self, BeginSynchronizedUpdate, Clear, ClearType, EndSynchronizedUpdate},
-        QueueableCommand,
     },
     std::io::{Result, Write},
     std::ops::RangeInclusive,
     std::sync::{
-        atomic::{AtomicBool, Ordering},
         Arc,
+        atomic::{AtomicBool, Ordering},
     },
     unicode_segmentation::UnicodeSegmentation,
 };
@@ -2665,16 +2665,18 @@ mod tests {
         assert!(painter.frame_open);
 
         let lines = make_lines(">", " ", "", "prompt", "");
-        assert!(painter
-            .repaint_buffer(
-                &TestPrompt,
-                &lines,
-                PromptEditMode::Default,
-                None,
-                false,
-                &None,
-            )
-            .is_err());
+        assert!(
+            painter
+                .repaint_buffer(
+                    &TestPrompt,
+                    &lines,
+                    PromptEditMode::Default,
+                    None,
+                    false,
+                    &None,
+                )
+                .is_err()
+        );
 
         let W::FailOnce(output, _, failed) = &painter.stdout else {
             panic!("test writer changed");
@@ -4385,8 +4387,8 @@ mod tests {
     #[test]
     fn crossterm_defaults_were_the_bright_palette_entries() {
         use crossterm::{
-            style::{Color as CtColor, SetForegroundColor},
             Command,
+            style::{Color as CtColor, SetForegroundColor},
         };
 
         fn crossterm_sgr(color: CtColor) -> String {

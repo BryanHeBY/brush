@@ -1,7 +1,7 @@
 [package]
 authors = ["The Nushell Project Developers"]
 description = "The Reedline fork used by brush for line editing"
-edition = "2021"
+edition = "2024"
 license = "MIT"
 name = "brush-reedline"
 repository = "https://github.com/reubeno/brush"

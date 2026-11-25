@@ -4,11 +4,11 @@ use crossterm::event::{
 use crossterm::execute;
 use {
     crossterm::{
-        event::{poll, Event, KeyCode, KeyEvent},
+        event::{Event, KeyCode, KeyEvent, poll},
         terminal,
     },
     std::{
-        io::{stdout, Result, Write},
+        io::{Result, Write, stdout},
         time::Duration,
     },
 };

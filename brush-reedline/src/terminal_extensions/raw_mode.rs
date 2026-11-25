@@ -28,7 +28,7 @@ pub(crate) fn enable() -> io::Result<()> {
 /// Turns output processing back on for `tty`, with `\n` written as `\r\n`
 #[cfg(unix)]
 fn keep_output_processing(tty: impl std::os::fd::AsFd) -> io::Result<()> {
-    use rustix::termios::{tcgetattr, tcsetattr, OptionalActions, OutputModes};
+    use rustix::termios::{OptionalActions, OutputModes, tcgetattr, tcsetattr};
 
     let mut termios = tcgetattr(&tty)?;
     termios.output_modes |= OutputModes::OPOST | OutputModes::ONLCR;
@@ -43,8 +43,8 @@ mod tests {
     use super::keep_output_processing;
     use rustix::{
         fs::{Mode, OFlags},
-        pty::{grantpt, openpt, ptsname, unlockpt, OpenptFlags},
-        termios::{tcgetattr, tcsetattr, OptionalActions},
+        pty::{OpenptFlags, grantpt, openpt, ptsname, unlockpt},
+        termios::{OptionalActions, tcgetattr, tcsetattr},
     };
     use std::{
         fs::File,

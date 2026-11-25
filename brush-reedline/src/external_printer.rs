@@ -8,7 +8,7 @@
 use std::{
     fmt::Display,
     io,
-    sync::mpsc::{sync_channel, Receiver, SendError, SyncSender},
+    sync::mpsc::{Receiver, SendError, SyncSender, sync_channel},
 };
 
 pub const EXTERNAL_PRINTER_DEFAULT_CAPACITY: usize = 20;

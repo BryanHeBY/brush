@@ -1,12 +1,12 @@
 use crate::{
+    FindStop, WordKind,
     core_editor::{
+        CaretGeometry, Cursor,
         graphemes::{next_grapheme_boundary, prev_grapheme_boundary},
         line, recohere,
-        word::{self, categorize_char, CharClass},
-        CaretGeometry, Cursor,
+        word::{self, CharClass, categorize_char},
     },
     enums::{Direction, MotionTarget, WordEdge},
-    FindStop, WordKind,
 };
 
 /// A resolved motion, as two byte positions:
@@ -649,7 +649,7 @@ mod tests {
     #[test]
     fn resolve_motion_line_targets_the_adjacent_line() {
         let buf = "ab\ncd\nef"; // ab@0-1 \n@2 cd@3-4 \n@5 ef@6-7
-                                // from "cd" (origin 4): down → start of "ef", up → start of "ab"
+        // from "cd" (origin 4): down → start of "ef", up → start of "ab"
         assert_eq!(
             resolve_motion(
                 buf,

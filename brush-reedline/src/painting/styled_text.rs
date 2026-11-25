@@ -1,8 +1,8 @@
 use nu_ansi_term::Style;
 
+use crate::Prompt;
 use crate::core_editor::{ensure_grapheme_boundary_next, ensure_grapheme_boundary_prev};
 use crate::terminal_extensions::semantic_prompt::{PromptKind, SemanticPromptMarkers};
-use crate::Prompt;
 
 use super::utils::{escape_control, strip_ansi};
 
@@ -658,8 +658,8 @@ mod test {
     mod continue_hint_lines {
         use pretty_assertions::assert_eq;
 
-        use crate::painting::continue_hint_lines;
         use crate::DefaultPrompt;
+        use crate::painting::continue_hint_lines;
 
         #[test]
         fn each_hint_line_gets_the_indicator() {

@@ -10,9 +10,9 @@
 // menu; without quick completions, the menu closes once the line is empty.
 
 use reedline::{
-    default_emacs_keybindings, ColumnarMenu, Completer, CompletionResult, DefaultPrompt, Emacs,
-    KeyCode, KeyModifiers, Keybindings, MenuBuilder, Reedline, ReedlineEvent, ReedlineMenu, Signal,
-    Span, Suggestion,
+    ColumnarMenu, Completer, CompletionResult, DefaultPrompt, Emacs, KeyCode, KeyModifiers,
+    Keybindings, MenuBuilder, Reedline, ReedlineEvent, ReedlineMenu, Signal, Span, Suggestion,
+    default_emacs_keybindings,
 };
 use std::io;
 
