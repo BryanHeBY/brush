@@ -13,7 +13,7 @@ assignees: ''
 Describe the problem you are observing.
 
 ## Steps to reproduce
-1. minimal posssible steps necessary
+1. minimal possible steps necessary
 2. to cause the problem
 
 ## Screenshots/Screencaptures
