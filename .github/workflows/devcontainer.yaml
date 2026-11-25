@@ -28,6 +28,7 @@ jobs:
           persist-credentials: false
 
       - name: Login to GitHub Container Registry
+        if: github.repository == 'reubeno/brush'
         uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
         with:
           registry: ghcr.io
@@ -39,10 +40,11 @@ jobs:
         with:
           imageName: ghcr.io/reubeno/brush/devcontainer
           imageTag: latest
-          cacheFrom: ghcr.io/reubeno/brush/devcontainer
+          cacheFrom: ${{ github.repository == 'reubeno/brush' && 'ghcr.io/reubeno/brush/devcontainer' || '' }}
           push: never
 
   build_and_publish:
+    if: github.repository == 'reubeno/brush'
     name: "Build and publish devcontainer"
     runs-on: ubuntu-26.04
     permissions:
