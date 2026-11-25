@@ -7,7 +7,10 @@ use {
         },
         enums::{Direction, WordEdge, WordKind},
     },
-    std::{convert::From, ops::Range},
+    std::{
+        convert::From,
+        ops::{Bound, Range},
+    },
     unicode_segmentation::UnicodeSegmentation,
 };
 
@@ -23,15 +26,24 @@ use {
 /// cursor logic therefore treats `\r`/`\r\n` as a terminator throughout (see
 /// the `line` and `word` modules and the rest policies). Do not drop those
 /// guards on the assumption that the buffer is CR-free.
-#[derive(Debug, PartialEq, Eq, Clone, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct LineBuffer {
     lines: String,
+    text_revision: u64,
     /// The cursor as a (possibly empty) range. An empty cursor (anchor == head)
     /// is a plain insertion point; a wider one carries the active selection.
     /// Single source of truth — the old `insertion_point` + `selection_anchor`
     /// pair collapsed into this.
     cursor: Cursor,
 }
+
+impl PartialEq for LineBuffer {
+    fn eq(&self, other: &Self) -> bool {
+        self.lines == other.lines && self.cursor == other.cursor
+    }
+}
+
+impl Eq for LineBuffer {}
 
 impl From<&str> for LineBuffer {
     fn from(input: &str) -> Self {
@@ -207,9 +219,29 @@ impl LineBuffer {
         &self.lines
     }
 
+    /// A revision that advances on text changes, but not cursor moves.
+    pub const fn text_revision(&self) -> u64 {
+        self.text_revision
+    }
+
+    pub(super) fn restore(&mut self, mut buffer: Self) {
+        buffer.text_revision = self.text_revision;
+        if self.lines != buffer.lines {
+            buffer.note_text_change();
+        }
+        *self = buffer;
+    }
+
+    fn note_text_change(&mut self) {
+        self.text_revision = self.text_revision.wrapping_add(1);
+    }
+
     /// Set to a single line of `buffer` and reset the `InsertionPoint` cursor to the end
     pub fn set_buffer(&mut self, buffer: String) {
-        self.lines = buffer;
+        if self.lines != buffer {
+            self.lines = buffer;
+            self.note_text_change();
+        }
         self.set_head(self.lines.len());
     }
 
@@ -382,6 +414,7 @@ impl LineBuffer {
     ///Insert a single character at the insertion point and move right
     pub fn insert_char(&mut self, c: char) {
         self.lines.insert(self.cursor.head(), c);
+        self.note_text_change();
         self.move_right();
     }
 
@@ -392,7 +425,11 @@ impl LineBuffer {
     /// ## Unicode safety:
     /// Does not validate the incoming string or the current cursor position
     pub fn insert_str(&mut self, string: &str) {
+        if string.is_empty() {
+            return;
+        }
         self.lines.insert_str(self.insertion_point(), string);
+        self.note_text_change();
         self.set_head(self.insertion_point() + string.len());
     }
 
@@ -408,8 +445,7 @@ impl LineBuffer {
 
     /// Empty buffer and reset cursor
     pub fn clear(&mut self) {
-        self.lines = String::new();
-        self.set_head(0);
+        self.set_buffer(String::new());
     }
 
     /// Clear everything beginning at the cursor to the right/end.
@@ -419,7 +455,7 @@ impl LineBuffer {
         // callers (`cut_from_end`) copy the slice from `insertion_point()`, so a
         // Block/selection cursor (head past the caret) would otherwise leave the
         // covered grapheme behind while reporting it as cut.
-        self.lines.truncate(self.insertion_point());
+        self.replace_range(self.insertion_point().., "");
     }
 
     /// Clear beginning at the cursor up to the end of the line.
@@ -475,7 +511,20 @@ impl LineBuffer {
     where
         R: std::ops::RangeBounds<usize>,
     {
-        self.lines.replace_range(range, replace_with);
+        let start = match range.start_bound() {
+            Bound::Unbounded => 0,
+            Bound::Included(&start) => start,
+            Bound::Excluded(&start) => start.checked_add(1).expect("range start overflow"),
+        };
+        let end = match range.end_bound() {
+            Bound::Unbounded => self.lines.len(),
+            Bound::Included(&end) => end.checked_add(1).expect("range end overflow"),
+            Bound::Excluded(&end) => end,
+        };
+        if self.lines.get(start..end) != Some(replace_with) {
+            self.lines.replace_range(start..end, replace_with);
+            self.note_text_change();
+        }
     }
 
     /// Checks to see if the current edit position is pointing to whitespace

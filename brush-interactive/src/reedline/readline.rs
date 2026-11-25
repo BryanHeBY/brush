@@ -268,7 +268,8 @@ impl Buffer {
 struct HistorySearch {
     prefix: String,
     prefix_search: bool,
-    start_cursor: usize,
+    draft: Buffer,
+    revision: u64,
     id: i64,
     last: Buffer,
 }
@@ -572,6 +573,46 @@ impl ReadlineSession {
                 _ => {}
             }
         }
+        if !self.navigate_suggestions
+            && !self.options.history_preserve_point
+            && !self.options.mark_modified_lines
+            && !self.options.revert_all_at_newline
+        {
+            use reedline::EditCommand;
+
+            // Keep multiline caret movement and active menus ahead of the
+            // history walk. Explicit Previous/Next bindings still use the
+            // editor's ordinary (unfiltered) traversal.
+            let up = || {
+                ReedlineEvent::UntilFound(vec![
+                    ReedlineEvent::Edit(vec![EditCommand::MoveLineUp { select: false }]),
+                    Action::HistoryBackward.event(),
+                ])
+            };
+            let down = || {
+                ReedlineEvent::UntilFound(vec![
+                    ReedlineEvent::Edit(vec![EditCommand::MoveLineDown { select: false }]),
+                    Action::HistoryForward.event(),
+                ])
+            };
+            return match event {
+                ReedlineEvent::Up => Some(up()),
+                ReedlineEvent::Down => Some(down()),
+                ReedlineEvent::UntilFound(events) => match events.as_slice() {
+                    [ReedlineEvent::MenuUp, ReedlineEvent::Up] => {
+                        Some(ReedlineEvent::UntilFound(vec![ReedlineEvent::MenuUp, up()]))
+                    }
+                    [ReedlineEvent::MenuDown, ReedlineEvent::Down] => {
+                        Some(ReedlineEvent::UntilFound(vec![
+                            ReedlineEvent::MenuDown,
+                            down(),
+                        ]))
+                    }
+                    _ => None,
+                },
+                _ => None,
+            };
+        }
         if !self.options.history_preserve_point {
             return None;
         }
@@ -644,6 +685,7 @@ impl ReadlineSession {
     fn search(
         &mut self,
         current: &Buffer,
+        revision: u64,
         history: &history::History,
         action: Action,
     ) -> Option<Buffer> {
@@ -651,22 +693,24 @@ impl ReadlineSession {
         self.last_completion = None;
         let backward = matches!(action, Action::HistoryBackward | Action::PreviousHistory);
         let plain = matches!(action, Action::PreviousHistory | Action::NextHistory);
+        // A recalled line may return to the same spelling after an edit;
+        // its text revision still ends the old traversal, unlike a cursor move.
         let previous = self.history.take().filter(|search| {
-            search.last == *current
-                || (!plain
-                    && search.prefix_search
-                    && !self.navigate_suggestions
-                    && !current.text.contains('\n')
-                    && !search.last.text.contains('\n'))
+            search.prefix_search != plain
+                && search.revision == revision
+                && search.last.text == current.text
         });
-        // An edit changes the query, not the history position it searches from.
-        let unchanged = previous.as_ref().filter(|search| search.last == *current);
-        let start_cursor = unchanged.map_or(current.cursor, |search| search.start_cursor);
-        let prefix = match unchanged {
-            Some(search) => search.prefix.as_str(),
-            None if plain => "",
-            None => current.text.get(..current.cursor)?,
+        let draft_prefix = if plain {
+            ""
+        } else {
+            current.text.get(..current.cursor)?
         };
+        let start_cursor = previous
+            .as_ref()
+            .map_or(current.cursor, |search| search.draft.cursor);
+        let prefix = previous
+            .as_ref()
+            .map_or(draft_prefix, |search| search.prefix.as_str());
         if !backward && previous.is_none() {
             self.bell();
             return None;
@@ -690,7 +734,12 @@ impl ReadlineSession {
                         previous.as_ref().map(|search| search.last.text.as_str())
                     }
                     HistoryNavigationDedup::Bash => {
-                        previous.as_ref().map(|_| current.text.as_str())
+                        // Unfiltered traversal exposes raw duplicates in
+                        // Bash mode; prefix search can skip the current text.
+                        previous
+                            .as_ref()
+                            .filter(|_| !prefix.is_empty())
+                            .map(|_| current.text.as_str())
                     }
                     HistoryNavigationDedup::Unique => unreachable!(),
                 };
@@ -710,21 +759,25 @@ impl ReadlineSession {
                     matched_prefix_len(&item.command_line, prefix, self.options.search_ignore_case)?
                 },
             };
-            self.history = Some(HistorySearch {
-                prefix: prefix.to_owned(),
-                prefix_search: !plain,
-                start_cursor,
-                id: item.id,
-                last: next.clone(),
+            self.history = Some(if let Some(mut search) = previous {
+                search.id = item.id;
+                search.last = next.clone();
+                search
+            } else {
+                HistorySearch {
+                    prefix: draft_prefix.to_owned(),
+                    prefix_search: !plain,
+                    draft: current.clone(),
+                    revision,
+                    id: item.id,
+                    last: next.clone(),
+                }
             });
             return Some(next);
         }
 
-        if !backward && prefix.is_empty() && unchanged.is_some() {
-            return Some(Buffer {
-                text: String::new(),
-                cursor: 0,
-            });
+        if !backward {
+            return previous.map(|search| search.draft);
         }
         self.history = previous;
         self.bell();
@@ -960,7 +1013,8 @@ impl<SE: brush_core::ShellExtensions> reedline::Menu for ActionMenu<SE> {
                         if shared.browse_suggestion(&current, history, self.action) {
                             return None;
                         }
-                        let next = shared.search(&current, history, self.action)?;
+                        let revision = editor.line_buffer().text_revision();
+                        let next = shared.search(&current, revision, history, self.action)?;
                         Some((next, reedline::UndoBehavior::HistoryNavigation))
                     }
                     _ => {
@@ -975,6 +1029,9 @@ impl<SE: brush_core::ShellExtensions> reedline::Menu for ActionMenu<SE> {
             })
         }) {
             next.apply(editor, undo);
+            if let Some(search) = &mut shared.history {
+                search.revision = editor.line_buffer().text_revision();
+            }
         }
         self.active = false;
     }

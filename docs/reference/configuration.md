@@ -80,6 +80,16 @@ suggestion. In Emacs editing mode, Ctrl+Right accepts up to the start of the
 next word, including any separators crossed, or moves by word when there is
 no suggestion.
 
+With suggestion navigation off, Reedline Up/Down use prefix history when not
+moving between input lines. The explicit `history-search-backward` and
+`history-search-forward` bindings share this behavior. Editing text starts
+a new search. The first
+backward search starts at the newest match for the text before the cursor.
+Moving only the cursor keeps the current search. Moving forward past the
+newest match restores the original draft and cursor. Readline settings for
+marking or reverting edits to recalled commands keep their existing history
+behavior.
+
 History navigation with `"unique"` visits only the newest occurrence of each
 exact command line in the current history, in either direction. `"adjacent"`
 skips consecutive identical matches in the active search, but allows

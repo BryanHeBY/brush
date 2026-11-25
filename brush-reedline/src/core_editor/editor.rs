@@ -100,7 +100,7 @@ impl Editor {
 
     /// Set the [`LineBuffer`] with undo behavior.
     pub(crate) fn set_line_buffer(&mut self, line_buffer: LineBuffer, undo_behavior: UndoBehavior) {
-        self.line_buffer = line_buffer;
+        self.line_buffer.restore(line_buffer);
         self.update_undo_state(undo_behavior);
     }
 
@@ -941,12 +941,12 @@ impl Editor {
 
     fn undo(&mut self) {
         let val = self.edit_stack.undo();
-        self.line_buffer = val.clone();
+        self.line_buffer.restore(val.clone());
     }
 
     fn redo(&mut self) {
         let val = self.edit_stack.redo();
-        self.line_buffer = val.clone();
+        self.line_buffer.restore(val.clone());
     }
 
     pub(crate) fn update_undo_state(&mut self, undo_behavior: UndoBehavior) {
