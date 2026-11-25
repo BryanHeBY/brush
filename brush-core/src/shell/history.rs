@@ -10,8 +10,7 @@ use crate::{
     error,
     history::HistoryControl,
     history_file::{
-        OwnAppend, ReadPosition, complete_record_end, file_metadata, lock_history_file,
-        tail_checksum,
+        OwnAppend, ReadPosition, complete_record_end, lock_history_file, tail_checksum,
     },
     openfiles, patterns,
 };
@@ -365,7 +364,7 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
         };
 
         let mut file = std::fs::File::open(&path)?;
-        let (metadata, file_id) = file_metadata(&file)?;
+        let (metadata, file_id) = crate::sys::fs::history_file_metadata(&file)?;
         let length = metadata.len();
 
         let stored = if new_only {
@@ -494,7 +493,7 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
         let Ok(mut file) = std::fs::File::open(&path) else {
             return;
         };
-        let Ok((_metadata, file_id)) = file_metadata(&file) else {
+        let Ok((_metadata, file_id)) = crate::sys::fs::history_file_metadata(&file) else {
             return;
         };
         let mut bytes = Vec::new();
@@ -518,7 +517,7 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
         let Ok(mut file) = std::fs::File::open(&path) else {
             return;
         };
-        let Ok((metadata, file_id)) = file_metadata(&file) else {
+        let Ok((metadata, file_id)) = crate::sys::fs::history_file_metadata(&file) else {
             return;
         };
         let offset = metadata.len();

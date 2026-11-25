@@ -10,16 +10,6 @@ use std::{
 
 use crate::{error, history::Item};
 
-/// Identity of a history file, used to detect replacement.
-#[cfg(unix)]
-pub(crate) type Identity = (u64, u64);
-/// Identity of a history file, used to detect replacement.
-#[cfg(windows)]
-pub(crate) type Identity = (u64, u128);
-/// Identity is not available on the remaining platforms.
-#[cfg(not(any(unix, windows)))]
-pub(crate) type Identity = ();
-
 /// A byte cursor into a history file.
 #[derive(Clone)]
 pub(crate) struct ReadPosition {
@@ -28,7 +18,7 @@ pub(crate) struct ReadPosition {
     /// Number of complete bytes already consumed.
     pub offset: u64,
     /// Identity of the file when the cursor was recorded.
-    pub identity: Option<Identity>,
+    pub identity: Option<crate::sys::fs::HistoryFileIdentity>,
     /// Checksum of the bytes before `offset`, used to detect in-place replacement.
     pub checksum: u64,
 }
@@ -102,23 +92,6 @@ pub(crate) fn complete_record_end(bytes: &[u8]) -> usize {
     } else {
         end
     }
-}
-
-/// Gets metadata and identity from the same open handle, not two snapshots of a path.
-pub(crate) fn file_metadata(
-    file: &std::fs::File,
-) -> std::io::Result<(std::fs::Metadata, Option<Identity>)> {
-    let metadata = file.metadata()?;
-    #[cfg(unix)]
-    let identity = {
-        use std::os::unix::fs::MetadataExt as _;
-        Some((metadata.dev(), metadata.ino()))
-    };
-    #[cfg(windows)]
-    let identity = crate::sys::fs::history_file_identity(file).ok();
-    #[cfg(not(any(unix, windows)))]
-    let identity = None;
-    Ok((metadata, identity))
 }
 
 /// Keeps the last `max_items` entries in a history file's raw bytes.
@@ -303,10 +276,6 @@ pub(crate) fn atomic_write(path: &Path, contents: &[u8]) -> Result<(), error::Er
         Err(error) => return Err(error.into()),
     };
     let permissions = target_metadata.as_ref().map(std::fs::Metadata::permissions);
-    #[cfg(unix)]
-    let group = target_metadata
-        .as_ref()
-        .map(std::os::unix::fs::MetadataExt::gid);
 
     let file_name = target.file_name().ok_or_else(|| {
         std::io::Error::new(std::io::ErrorKind::InvalidInput, "invalid history file")
@@ -318,11 +287,7 @@ pub(crate) fn atomic_write(path: &Path, contents: &[u8]) -> Result<(), error::Er
         temp_name.push(file_name);
         temp_name.push(format!(".tmp.{}.{attempt}", std::process::id()));
         let candidate = target.with_file_name(temp_name);
-        #[cfg(windows)]
-        let replacement = crate::sys::fs::create_history_replacement(&candidate);
-        #[cfg(not(windows))]
-        let replacement = crate::sys::fs::create_new_private_file(&candidate);
-        match replacement {
+        match crate::sys::fs::new_history_replacement(&candidate) {
             Ok(file) => {
                 created = Some((file, candidate));
                 break;
@@ -340,18 +305,12 @@ pub(crate) fn atomic_write(path: &Path, contents: &[u8]) -> Result<(), error::Er
     };
 
     let result = (|| -> Result<(), error::Error> {
-        #[cfg(windows)]
-        if target_metadata.is_some() {
-            crate::sys::fs::copy_history_dacl(&file, &target)?;
-        }
+        crate::sys::fs::prepare_history_replacement(&file, &target, target_metadata.is_some())?;
         file.write_all(contents)?;
         if let Some(permissions) = permissions {
             std::fs::set_permissions(&temp_path, permissions)?;
         }
-        #[cfg(unix)]
-        if let Some(group) = group {
-            crate::sys::fs::set_file_group(&file, group)?;
-        }
+        crate::sys::fs::preserve_history_group(&file, target_metadata.as_ref())?;
         file.sync_all()?;
         drop(file);
         crate::sys::fs::replace_file(&temp_path, &target)?;
@@ -361,52 +320,4 @@ pub(crate) fn atomic_write(path: &Path, contents: &[u8]) -> Result<(), error::Er
         let _ = std::fs::remove_file(&temp_path);
     }
     result
-}
-
-#[cfg(test)]
-#[cfg(any(unix, windows))]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn portable_trim_retains_appends_from_the_current_lock_holder() -> anyhow::Result<()> {
-        use std::{fs::OpenOptions, sync::mpsc, time::Duration};
-
-        let dir = tempfile::tempdir()?;
-        let path = dir.path().join("history");
-        std::fs::write(&path, b"old1\nold2\nold3\n")?;
-        let lock = lock_history_file(&path)?;
-        let (ready_tx, ready_rx) = mpsc::channel();
-        let (done_tx, done_rx) = mpsc::channel();
-        let trim_path = path.clone();
-        let trim = std::thread::spawn(move || {
-            let _ = ready_tx.send(());
-            let result =
-                trim_history_file(&trim_path, 2, crate::history::HistoryWriteMode::Portable);
-            let _ = done_tx.send(());
-            result
-        });
-
-        let ready = ready_rx.recv_timeout(Duration::from_secs(5));
-        let waited = done_rx.recv_timeout(Duration::from_millis(100));
-        let append = (|| -> std::io::Result<()> {
-            let mut file = OpenOptions::new().append(true).open(&path)?;
-            file.write_all(b"other-session\n")
-        })();
-        drop(lock);
-        trim.join()
-            .map_err(|_| anyhow::anyhow!("trim thread panicked"))??;
-
-        ready?;
-        anyhow::ensure!(
-            matches!(waited, Err(mpsc::RecvTimeoutError::Timeout)),
-            "trim did not wait for the sidecar lock"
-        );
-        append?;
-        anyhow::ensure!(
-            std::fs::read(&path)? == b"old3\nother-session\n",
-            "trim discarded the concurrent append"
-        );
-        Ok(())
-    }
 }

@@ -383,6 +383,10 @@ pub fn set_file_group(file: &std::fs::File, gid: u32) -> std::io::Result<()> {
 }
 
 #[cfg(test)]
+#[path = "history_tests.rs"]
+mod history_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
