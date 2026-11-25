@@ -613,7 +613,8 @@ fn history_survives_hangup() -> anyhow::Result<()> {
         let mut session = start_history_session(backend, None, home.path())?;
         session.expect_prompt()?;
 
-        session.send_line("echo needle-in-history")?;
+        // Match command output, not the editor repainting the same text while typing.
+        session.send_line(r#"echo needle-in-""history"#)?;
         session.expect("needle-in-history")?;
         session.expect_prompt()?;
 
@@ -641,7 +642,7 @@ fn history_survives_hangup() -> anyhow::Result<()> {
 
         let contents = read_history_file(home.path());
         assert!(
-            contents.contains("echo needle-in-history"),
+            contents.contains(r#"echo needle-in-""history"#),
             "history lost on SIGHUP (backend {backend:?}): {contents:?}"
         );
     }
