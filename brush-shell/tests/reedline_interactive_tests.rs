@@ -278,6 +278,20 @@ fn mark_directories_off_keeps_filename_escaping() -> anyhow::Result<()> {
     clippy::multiple_unsafe_ops_per_block,
     reason = "pre-exec setup and optional controlling-terminal ioctl are one operation"
 )]
+fn set_test_controlling_terminal() -> std::io::Result<()> {
+    #[cfg(not(target_os = "macos"))]
+    let control = libc::TIOCSCTTY;
+    #[cfg(target_os = "macos")]
+    let control = libc::TIOCSCTTY.into();
+
+    // SAFETY: invoked after setsid in the test child, with the PTY slave on fd 0.
+    if unsafe { libc::ioctl(0, control, 0) } == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
 fn herdr_with_redirected_stdout(controlling_terminal: bool) -> anyhow::Result<()> {
     use std::io::Write as _;
     use std::os::fd::AsRawFd as _;
@@ -313,8 +327,8 @@ fn herdr_with_redirected_stdout(controlling_terminal: bool) -> anyhow::Result<()
     unsafe {
         cmd.pre_exec(move || {
             nix::unistd::setsid()?;
-            if controlling_terminal && libc::ioctl(0, libc::TIOCSCTTY, 0) != 0 {
-                return Err(std::io::Error::last_os_error());
+            if controlling_terminal {
+                set_test_controlling_terminal()?;
             }
             Ok(())
         });
