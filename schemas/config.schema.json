@@ -73,6 +73,26 @@
         }
       }
     },
+    "HistoryNavigationDedupConfig": {
+      "description": "Interactive history duplicate handling exposed in the configuration file.",
+      "oneOf": [
+        {
+          "description": "Show only the newest occurrence of each exact command line.",
+          "type": "string",
+          "const": "unique"
+        },
+        {
+          "description": "Skip consecutive equal matches while traversing.",
+          "type": "string",
+          "const": "adjacent"
+        },
+        {
+          "description": "Preserve Bash-compatible navigation behavior.",
+          "type": "string",
+          "const": "bash"
+        }
+      ]
+    },
     "HistoryWriteModeConfig": {
       "description": "History file write policy exposed in the configuration file.",
       "oneOf": [
@@ -92,6 +112,17 @@
       "description": "User interface configuration options.\n\nBuilt from a configuration file or with [`Default`]. New settings are added as the shell\ngains them; use `..Default::default()` when constructing a value by hand so later fields\ndo not break the literal.",
       "type": "object",
       "properties": {
+        "history-navigation-dedup": {
+          "description": "Duplicate handling for Up/Down and explicit prefix history searches.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/HistoryNavigationDedupConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "history-suggestion-navigation": {
           "description": "Browse visible history suggestions with Up and Down and accept with Right.",
           "type": [

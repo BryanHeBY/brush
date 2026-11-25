@@ -2924,7 +2924,8 @@ impl Reedline {
 
         if !self.history_last_run.is_recalled() {
             // On `Err` the next press retries on the fresh cursor; no rollback.
-            self.history_cursor.back(self.history.as_ref())?;
+            self.history_cursor
+                .walk(self.history.as_ref(), crate::SearchDirection::Backward)?;
         }
         self.input_mode = InputMode::HistoryTraversal;
         self.show_history_entry(HistoryLanding::FirstLineEnd);
@@ -3015,7 +3016,8 @@ impl Reedline {
             self.history_last_run.set_recalled(false);
         } else {
             let cursor_was_on_item = self.history_cursor.string_at_cursor().is_some();
-            self.history_cursor.forward(self.history.as_ref())?;
+            self.history_cursor
+                .walk(self.history.as_ref(), crate::SearchDirection::Forward)?;
 
             if cursor_was_on_item
                 && self.history_cursor.string_at_cursor().is_none()

@@ -14,7 +14,7 @@ mod input_backend;
 pub use input_backend::{InputBackend, InteractivePrompt, ReadResult};
 
 mod options;
-pub use options::UIOptions;
+pub use options::{HistoryNavigationDedup, UIOptions};
 
 mod refs;
 pub use refs::ShellRef;

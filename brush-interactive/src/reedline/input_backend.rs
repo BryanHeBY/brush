@@ -96,7 +96,12 @@ impl ReedlineInputBackend {
             compose_key_bindings(COMPLETION_MENU_NAME, options.history_suggestion_navigation);
 
         // Set up mutable edit mode.
-        let readline_session = readline::Session::new(options.history_suggestion_navigation);
+        let navigation = history::Navigation::default();
+        let readline_session = readline::Session::new(
+            options.history_suggestion_navigation,
+            options.history_navigation_dedup,
+            navigation.clone(),
+        );
         let mutable_edit_mode =
             edit_mode::MutableEditMode::new(key_bindings, readline_session.clone());
         let updatable_bindings = mutable_edit_mode.bindings();
@@ -115,6 +120,8 @@ impl ReedlineInputBackend {
         };
         let history = history::ReedlineHistory {
             shell: shell_ref.clone(),
+            navigation,
+            dedup: options.history_navigation_dedup,
         };
 
         // Set up completion menu. Set an empty marker to avoid the

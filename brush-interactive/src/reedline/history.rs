@@ -1,7 +1,124 @@
-use crate::refs;
+use std::{
+    collections::HashMap,
+    hash::{BuildHasher, RandomState},
+    sync::{Arc, Mutex, PoisonError},
+};
+
+use brush_core::history::{self, CommandLineFilter, Direction, Item, Query};
+
+use crate::{HistoryNavigationDedup, refs};
+
+/// The ordered newest-per-command view for this prompt, storing only IDs.
+#[derive(Clone, Default)]
+pub(super) struct Navigation(Arc<Mutex<UniqueIndex>>);
+
+#[derive(Default)]
+struct UniqueIndex {
+    // Newest first. Extend the scanned part of the history only on demand.
+    ids: Vec<i64>,
+    scanned_through: Option<i64>,
+    exhausted: bool,
+    hasher: RandomState,
+    first_by_hash: HashMap<u64, i64>,
+    collisions: HashMap<u64, Vec<i64>>,
+}
+
+impl UniqueIndex {
+    fn extend_until<'a>(
+        &mut self,
+        history: &'a history::History,
+        lower_bound: Option<i64>,
+        matches: impl Fn(&&Item) -> bool,
+    ) -> Option<&'a Item> {
+        if self.exhausted {
+            return None;
+        }
+        let entries = history::Search::new(
+            history,
+            Query {
+                direction: Direction::Backward,
+                not_at_or_before_id: lower_bound,
+                not_at_or_after_id: self.scanned_through,
+                ..Default::default()
+            },
+        );
+        for item in entries {
+            self.scanned_through = Some(item.id);
+            let hash = self.hasher.hash_one(&item.command_line);
+            if let Some(&first) = self.first_by_hash.get(&hash) {
+                let equal = |id| {
+                    history
+                        .get_by_id(id)
+                        .ok()
+                        .flatten()
+                        .is_some_and(|other| other.command_line == item.command_line)
+                };
+                if equal(first) {
+                    continue;
+                }
+                let collisions = self.collisions.entry(hash).or_default();
+                if collisions.iter().copied().any(equal) {
+                    continue;
+                }
+                collisions.push(item.id);
+            } else {
+                self.first_by_hash.insert(hash, item.id);
+            }
+            self.ids.push(item.id);
+            if matches(&item) {
+                return Some(item);
+            }
+        }
+        self.exhausted = lower_bound.is_none();
+        None
+    }
+}
+
+impl Navigation {
+    pub(super) fn begin(&self) {
+        *self.0.lock().unwrap_or_else(PoisonError::into_inner) = UniqueIndex::default();
+    }
+
+    pub(super) fn first_unique<'a>(
+        &self,
+        history: &'a history::History,
+        query: &Query,
+        matches: impl Fn(&Item) -> bool,
+    ) -> Option<&'a Item> {
+        let mut index = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        let matches = |item: &&Item| query.includes(item) && matches(item);
+
+        // Forward search needs all canonical IDs newer than the anchor.
+        if matches!(query.direction, Direction::Forward)
+            && let Some(anchor) = query.not_at_or_before_id
+            && index.scanned_through.is_none_or(|id| id > anchor)
+        {
+            let _ = index.extend_until(history, Some(anchor), |_| false);
+        }
+        let start = query
+            .not_at_or_after_id
+            .map_or(0, |id| index.ids.partition_point(|&i| i >= id));
+        let stop = query
+            .not_at_or_before_id
+            .map_or(index.ids.len(), |id| index.ids.partition_point(|&i| i > id));
+        let mut entries = index.ids[start..stop.max(start)]
+            .iter()
+            .filter_map(|&id| history.get_by_id(id).ok().flatten());
+        let result = match query.direction {
+            Direction::Forward => entries.rev().find(matches),
+            Direction::Backward => entries
+                .find(matches)
+                .or_else(|| index.extend_until(history, query.not_at_or_before_id, matches)),
+        };
+        drop(index);
+        result
+    }
+}
 
 pub(crate) struct ReedlineHistory<SE: brush_core::ShellExtensions> {
     pub shell: refs::ShellRef<SE>,
+    pub(super) navigation: Navigation,
+    pub(super) dedup: HistoryNavigationDedup,
 }
 
 impl<SE: brush_core::ShellExtensions> ReedlineHistory<SE> {
@@ -84,6 +201,40 @@ impl<SE: brush_core::ShellExtensions> reedline::History for ReedlineHistory<SE> 
         Ok(items)
     }
 
+    #[expect(clippy::significant_drop_tightening)]
+    fn search_navigation(
+        &self,
+        query: reedline::SearchQuery,
+    ) -> reedline::Result<Vec<reedline::HistoryItem>> {
+        if self.dedup == HistoryNavigationDedup::Bash {
+            return self.search(query);
+        }
+        let start = query.start_id;
+        let mut query = reedline_history_query_into_brush(query)?;
+        query.max_items = None;
+        let shell = self.lock_shell();
+        let history = get_shell_history(&shell)?;
+        let folded =
+            take_case_insensitive_filter(&mut query, shell.readline_options().search_ignore_case);
+        let matches = |item: &Item| matches_folded(item, folded.as_ref());
+        let entry = if self.dedup == HistoryNavigationDedup::Unique {
+            self.navigation.first_unique(history, &query, matches)
+        } else {
+            let current = start.and_then(|id| history.get_by_id(id.0).ok().flatten());
+            history
+                .search(query)
+                .map_err(brush_error_to_reedline)?
+                .find(|item| {
+                    current.is_none_or(|current| current.command_line != item.command_line)
+                        && matches(item)
+                })
+        };
+        Ok(entry
+            .map(brush_history_item_to_reedline)
+            .into_iter()
+            .collect())
+    }
+
     /// Update a history item.
     ///
     /// # Arguments
@@ -143,18 +294,8 @@ fn matching_history<'a, SE: brush_core::ShellExtensions>(
     shell: &'a tokio::sync::MutexGuard<'_, brush_core::Shell<SE>>,
     mut query: brush_core::history::Query,
 ) -> reedline::Result<impl Iterator<Item = &'a brush_core::history::Item>> {
-    use brush_core::history::CommandLineFilter;
-
-    let filter = if shell.readline_options().search_ignore_case {
-        query.command_line_filter.take().map(|filter| match filter {
-            CommandLineFilter::Exact(value) => CommandLineFilter::Exact(value.to_lowercase()),
-            CommandLineFilter::Contains(value) => CommandLineFilter::Contains(value.to_lowercase()),
-            CommandLineFilter::Prefix(value) => CommandLineFilter::Prefix(value.to_lowercase()),
-            CommandLineFilter::Suffix(value) => CommandLineFilter::Suffix(value.to_lowercase()),
-        })
-    } else {
-        None
-    };
+    let filter =
+        take_case_insensitive_filter(&mut query, shell.readline_options().search_ignore_case);
     let limit = if filter.is_some() {
         query
             .max_items
@@ -167,18 +308,33 @@ fn matching_history<'a, SE: brush_core::ShellExtensions>(
         .search(query)
         .map_err(brush_error_to_reedline)?;
     Ok(entries
-        .filter(move |item| {
-            filter.as_ref().is_none_or(|filter| {
-                let command = item.command_line.to_lowercase();
-                match filter {
-                    CommandLineFilter::Exact(value) => command == *value,
-                    CommandLineFilter::Contains(value) => command.contains(value),
-                    CommandLineFilter::Prefix(value) => command.starts_with(value),
-                    CommandLineFilter::Suffix(value) => command.ends_with(value),
-                }
-            })
-        })
+        .filter(move |item| matches_folded(item, filter.as_ref()))
         .take(limit.unwrap_or(usize::MAX)))
+}
+
+fn take_case_insensitive_filter(query: &mut Query, ignore_case: bool) -> Option<CommandLineFilter> {
+    if ignore_case {
+        query.command_line_filter.take().map(|filter| match filter {
+            CommandLineFilter::Exact(value) => CommandLineFilter::Exact(value.to_lowercase()),
+            CommandLineFilter::Contains(value) => CommandLineFilter::Contains(value.to_lowercase()),
+            CommandLineFilter::Prefix(value) => CommandLineFilter::Prefix(value.to_lowercase()),
+            CommandLineFilter::Suffix(value) => CommandLineFilter::Suffix(value.to_lowercase()),
+        })
+    } else {
+        None
+    }
+}
+
+fn matches_folded(item: &Item, filter: Option<&CommandLineFilter>) -> bool {
+    filter.is_none_or(|filter| {
+        let command = item.command_line.to_lowercase();
+        match filter {
+            CommandLineFilter::Exact(value) => command == *value,
+            CommandLineFilter::Contains(value) => command.contains(value),
+            CommandLineFilter::Prefix(value) => command.starts_with(value),
+            CommandLineFilter::Suffix(value) => command.ends_with(value),
+        }
+    })
 }
 
 fn brush_history_item_to_reedline(item: &brush_core::history::Item) -> reedline::HistoryItem {
@@ -280,6 +436,56 @@ mod tests {
     use reedline::History as _;
 
     /// A count is of the items that match the query.
+    #[test]
+    fn unique_navigation_is_lazy_and_preserves_exact_spelling()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut history = history::History::default();
+        for line in ["echo A", "echo  A", "echo a", "echo A"] {
+            history.add(Item::new(line))?;
+        }
+        let navigation = Navigation::default();
+        let mut query = Query {
+            direction: Direction::Backward,
+            ..Default::default()
+        };
+        for (offset, expected) in ["echo A", "echo a", "echo  A"].into_iter().enumerate() {
+            let found = navigation
+                .first_unique(&history, &query, |_| true)
+                .ok_or("missing history item")?;
+            assert_eq!(found.command_line, expected);
+            assert_eq!(
+                navigation
+                    .0
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .ids
+                    .len(),
+                offset + 1
+            );
+            assert!(
+                !navigation
+                    .0
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .exhausted
+            );
+            query.not_at_or_after_id = Some(found.id);
+        }
+        assert!(
+            navigation
+                .first_unique(&history, &query, |_| true)
+                .is_none()
+        );
+        assert!(
+            navigation
+                .0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .exhausted
+        );
+        Ok(())
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn count_counts_matching_items() -> Result<(), Box<dyn std::error::Error>> {
         // An interactive shell keeps history; with no HISTFILE, it's not loaded or saved.
@@ -296,6 +502,8 @@ mod tests {
         }
         let history = ReedlineHistory {
             shell: std::sync::Arc::new(tokio::sync::Mutex::new(shell)),
+            navigation: Navigation::default(),
+            dedup: HistoryNavigationDedup::default(),
         };
 
         let everything =

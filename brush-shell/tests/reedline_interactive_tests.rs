@@ -1146,6 +1146,45 @@ fn reedline_italics_toggle_covers_options_and_history_suggestions() -> anyhow::R
 
 #[cfg(target_os = "linux")]
 #[test]
+fn readline_history_navigation_duplicate_policies() -> anyhow::Result<()> {
+    let prefix_keys = r#"
+"\e[A": history-search-backward
+"\e[B": history-search-forward
+"#;
+    for (mode, inputrc, up_count, down_count, expected) in [
+        (None, "", 2, 1, "ALPHA"),
+        (None, "", 3, 0, "BETA"),
+        (None, prefix_keys, 3, 0, "BETA"),
+        (None, prefix_keys, 3, 1, "ALPHA"),
+        (Some("adjacent"), "", 3, 0, "ALPHA"),
+        (Some("adjacent"), prefix_keys, 3, 0, "ALPHA"),
+        (Some("bash"), "", 4, 1, "ALPHA"),
+        (Some("adjacent"), "", 4, 1, "BETA"),
+        (Some("bash"), prefix_keys, 3, 0, "ALPHA"),
+    ] {
+        let config = mode.map(|mode| format!("[ui]\nhistory-navigation-dedup = {mode:?}\n"));
+        for_readline_shell_with_config(inputrc, config.as_deref(), |shell| {
+            if shell.bash {
+                return Ok(());
+            }
+            // With HISTCONTROL left empty, the four entries are A A B A.
+            for value in ["ALPHA", "ALPHA", "BETA", "ALPHA"] {
+                shell.run_and_expect(&format!("echo {value}"), value)?;
+            }
+            let draft = if inputrc.is_empty() { "" } else { "echo " };
+            let keys = format!(
+                "{draft}{}{}",
+                "\x1b[A".repeat(up_count),
+                "\x1b[B".repeat(down_count)
+            );
+            shell.run_and_expect(&keys, expected)
+        })?;
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+#[test]
 fn readline_prefix_history_edits_keep_the_recalled_entry_as_anchor() -> anyhow::Result<()> {
     const UP: &str = "\x1b[A";
     const DOWN: &str = "\x1b[B";

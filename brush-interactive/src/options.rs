@@ -1,3 +1,15 @@
+/// Duplicate handling for interactive history navigation.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum HistoryNavigationDedup {
+    /// Show only the newest occurrence of each exact command line.
+    #[default]
+    Unique,
+    /// Skip consecutive equal matches while traversing.
+    Adjacent,
+    /// Preserve Bash-compatible navigation behavior.
+    Bash,
+}
+
 /// Options for a shell user interface.
 ///
 /// New optional settings are added to this struct as the shell gains features. Code that
@@ -33,6 +45,9 @@ pub struct UIOptions {
     /// Whether Up and Down browse visible history suggestions before inserting them.
     #[builder(default)]
     pub history_suggestion_navigation: bool,
+    /// Duplicate handling for Up/Down and explicit prefix searches in Reedline.
+    #[builder(default)]
+    pub history_navigation_dedup: HistoryNavigationDedup,
     /// Whether to enable terminal integration.
     #[builder(default)]
     pub terminal_shell_integration: bool,

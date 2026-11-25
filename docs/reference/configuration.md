@@ -61,6 +61,7 @@ User interface settings.
 | `syntax-highlighting` | boolean | see below | `--enable-highlighting` | Enable syntax highlighting in the input line |
 | `italics` | boolean | `false` | | Allow italics in syntax highlighting and Reedline history suggestions |
 | `history-suggestion-navigation` | boolean | `false` | | Browse visible history suggestions with Up and Down and accept with Right in the `reedline` backend |
+| `history-navigation-dedup` | `"unique"`, `"adjacent"`, or `"bash"` | `"unique"` | | Duplicate handling for Up/Down history traversal and explicit prefix searches in Reedline |
 
 > The default value of `syntax-highlighting` depends on how `brush-shell`
 > was built: `true` when built with the `experimental` Cargo feature,
@@ -80,6 +81,15 @@ line uses the configured history bindings. Right accepts the displayed
 suggestion. In Emacs editing mode, Ctrl+Right accepts up to the start of the
 next word, including any separators crossed, or moves by word when there is
 no suggestion.
+
+History navigation with `"unique"` visits only the newest occurrence of each
+exact command line in the current history, in either direction. `"adjacent"`
+skips consecutive identical matches in the active search, but allows
+duplicates separated by a different match. `"bash"` retains raw ordinary
+navigation and skips consecutive duplicates in explicit prefix searches.
+Case and whitespace remain significant for duplicate handling, even when a
+prefix search is case-insensitive. This does not affect Ctrl+R, suggestions,
+or commands saved to the history file.
 
 ### `[history]` Section
 

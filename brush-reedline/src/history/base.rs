@@ -227,6 +227,13 @@ pub trait History: Send {
     /// return the results of a query
     fn search(&self, query: SearchQuery) -> Result<Vec<HistoryItem>>;
 
+    /// Searches for the next entry during ordinary history traversal.
+    ///
+    /// Backends may distinguish this from incremental search and suggestions.
+    fn search_navigation(&self, query: SearchQuery) -> Result<Vec<HistoryItem>> {
+        self.search(query)
+    }
+
     /// update an item atomically
     fn update(
         &mut self,

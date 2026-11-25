@@ -29,13 +29,17 @@ impl HistoryCursor {
     /// This moves the cursor backwards respecting the navigation query that is set
     /// - Results in a no-op if the cursor is at the initial point
     pub fn back(&mut self, history: &dyn History) -> Result<()> {
-        self.navigate_in_direction(history, SearchDirection::Backward)
+        self.navigate_in_direction(history, SearchDirection::Backward, false)
     }
 
     /// This moves the cursor forwards respecting the navigation-query that is set
     /// - Results in a no-op if the cursor is at the latest point
     pub fn forward(&mut self, history: &dyn History) -> Result<()> {
-        self.navigate_in_direction(history, SearchDirection::Forward)
+        self.navigate_in_direction(history, SearchDirection::Forward, false)
+    }
+
+    pub(crate) fn walk(&mut self, history: &dyn History, direction: SearchDirection) -> Result<()> {
+        self.navigate_in_direction(history, direction, true)
     }
 
     /// Moves the cursor to the oldest entry the navigation query matches.
@@ -89,13 +93,14 @@ impl HistoryCursor {
         &mut self,
         history: &dyn History,
         direction: SearchDirection,
+        navigation: bool,
     ) -> Result<()> {
         if direction == SearchDirection::Forward && self.current.is_none() {
             // if searching forward but we don't have a starting point, assume we are at the end
             return Ok(());
         }
         let start_id = self.current.as_ref().and_then(|e| e.id);
-        let mut next = history.search(SearchQuery {
+        let query = SearchQuery {
             start_id,
             end_id: None,
             start_time: None,
@@ -103,7 +108,13 @@ impl HistoryCursor {
             direction,
             limit: Some(1),
             filter: self.get_search_filter(),
-        })?;
+        };
+        let mut next =
+            if navigation && !matches!(self.query, HistoryNavigationQuery::SubstringSearch(_)) {
+                history.search_navigation(query)?
+            } else {
+                history.search(query)?
+            };
         if next.len() == 1 {
             self.current = Some(next.swap_remove(0));
         } else if direction == SearchDirection::Forward {

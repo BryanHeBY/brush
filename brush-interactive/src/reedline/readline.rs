@@ -9,14 +9,22 @@ use crossterm::event::{Event, KeyEvent};
 use reedline::{KeyCode, KeyModifiers, ReedlineEvent};
 use unicode_segmentation::UnicodeSegmentation as _;
 
-use crate::{completion, refs};
+use crate::{HistoryNavigationDedup, completion, refs};
+
+use super::history::Navigation;
 
 #[derive(Clone)]
 pub(super) struct Session(Arc<Mutex<ReadlineSession>>);
 
 impl Session {
-    pub(super) fn new(navigate_suggestions: bool) -> Self {
+    pub(super) fn new(
+        navigate_suggestions: bool,
+        dedup: HistoryNavigationDedup,
+        navigation: Navigation,
+    ) -> Self {
         Self(Arc::new(Mutex::new(ReadlineSession {
+            navigation,
+            dedup,
             navigate_suggestions,
             ..ReadlineSession::default()
         })))
@@ -310,7 +318,22 @@ fn history_matches<'a>(
     backward: bool,
     ignore_case: bool,
 ) -> Option<impl Iterator<Item = &'a history::Item>> {
-    let query = history::Query {
+    let query = history_query(prefix, id, backward, ignore_case);
+    let lowercase_prefix = ignore_case.then(|| prefix.to_lowercase());
+    Some(history.search(query).ok()?.filter(move |item| {
+        lowercase_prefix
+            .as_ref()
+            .is_none_or(|prefix| item.command_line.to_lowercase().starts_with(prefix))
+    }))
+}
+
+fn history_query(
+    prefix: &str,
+    id: Option<i64>,
+    backward: bool,
+    ignore_case: bool,
+) -> history::Query {
+    history::Query {
         direction: if backward {
             history::Direction::Backward
         } else {
@@ -321,18 +344,14 @@ fn history_matches<'a>(
         command_line_filter: (!ignore_case)
             .then(|| history::CommandLineFilter::Prefix(prefix.to_owned())),
         ..Default::default()
-    };
-    let lowercase_prefix = ignore_case.then(|| prefix.to_lowercase());
-    Some(history.search(query).ok()?.filter(move |item| {
-        lowercase_prefix
-            .as_ref()
-            .is_none_or(|prefix| item.command_line.to_lowercase().starts_with(prefix))
-    }))
+    }
 }
 
 #[derive(Default)]
 pub(super) struct ReadlineSession {
     history: Option<HistorySearch>,
+    navigation: Navigation,
+    dedup: HistoryNavigationDedup,
     suggestion: Option<HistorySuggestion>,
     suggestion_after_accept: Option<HistorySuggestion>,
     navigate_suggestions: bool,
@@ -359,6 +378,7 @@ impl ReadlineSession {
 
     pub(super) fn begin(&mut self, options: ReadlineOptions, utf8_locale: bool) {
         self.history = None;
+        self.navigation.begin();
         self.suggestion = None;
         self.suggestion_after_accept = None;
         self.has_single_line_draft = false;
@@ -653,15 +673,32 @@ impl ReadlineSession {
         }
 
         let id = previous.as_ref().map(|search| search.id);
-        if let Some(item) = history_matches(
-            history,
-            prefix,
-            id,
-            backward,
-            self.options.search_ignore_case,
-        )?
-        .find(|item| previous.is_none() || item.command_line != current.text)
-        {
+        let ignore_case = self.options.search_ignore_case;
+        let item = match self.dedup {
+            HistoryNavigationDedup::Unique => {
+                let query = history_query(prefix, id, backward, ignore_case);
+                let folded = ignore_case.then(|| prefix.to_lowercase());
+                self.navigation.first_unique(history, &query, |item| {
+                    folded
+                        .as_ref()
+                        .is_none_or(|prefix| item.command_line.to_lowercase().starts_with(prefix))
+                })
+            }
+            HistoryNavigationDedup::Adjacent | HistoryNavigationDedup::Bash => {
+                let skip = match self.dedup {
+                    HistoryNavigationDedup::Adjacent => {
+                        previous.as_ref().map(|search| search.last.text.as_str())
+                    }
+                    HistoryNavigationDedup::Bash => {
+                        previous.as_ref().map(|_| current.text.as_str())
+                    }
+                    HistoryNavigationDedup::Unique => unreachable!(),
+                };
+                history_matches(history, prefix, id, backward, ignore_case)?
+                    .find(|item| skip != Some(item.command_line.as_str()))
+            }
+        };
+        if let Some(item) = item {
             let next = Buffer {
                 text: item.command_line.clone(),
                 cursor: if self.options.history_preserve_point {
