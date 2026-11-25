@@ -587,7 +587,9 @@ fn start_history_session(
     let inputrc = home.join("inputrc");
     std::fs::write(&inputrc, "")?;
     cmd.env("PS1", "hist> ");
-    cmd.env("TERM", "xterm-256color");
+    // This PTY checks history and job control, not cursor positioning, and does
+    // not answer DSR. Avoid blocking the editor on a response the test cannot send.
+    cmd.env("TERM", "dumb");
     cmd.env("HOME", home);
     cmd.env("HISTFILE", home.join("history"));
     cmd.env("INPUTRC", inputrc);
@@ -726,8 +728,10 @@ fn hangup_stops_foreground_job_and_saves_history() -> anyhow::Result<()> {
     let mut session = start_history_session(None, None, home.path())?;
     session.expect_prompt()?;
 
-    session.send_line("sleep 30")?;
-    std::thread::sleep(std::time::Duration::from_millis(300));
+    session.send_line(r#"sh -c 'printf "foreground-%s\n" ready; exec sleep 30'"#)?;
+    session
+        .expect("foreground-ready")
+        .context("foreground job did not start")?;
 
     session
         .get_session_mut()

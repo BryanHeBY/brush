@@ -293,8 +293,8 @@ fn set_test_controlling_terminal() -> std::io::Result<()> {
 }
 
 fn herdr_with_redirected_stdout(controlling_terminal: bool) -> anyhow::Result<()> {
+    use nix::fcntl::{FcntlArg, OFlag, fcntl};
     use std::io::Write as _;
-    use std::os::fd::AsRawFd as _;
     use std::os::unix::process::CommandExt as _;
 
     let temp = tempfile::tempdir()?;
@@ -333,14 +333,11 @@ fn herdr_with_redirected_stdout(controlling_terminal: bool) -> anyhow::Result<()
             Ok(())
         });
     }
-    let mut child = cmd.spawn()?;
     let mut master = std::fs::File::from(pty.master);
-    // SAFETY: the master descriptor is open and owned by this test.
-    let flags = unsafe { libc::fcntl(master.as_raw_fd(), libc::F_GETFL) };
-    // SAFETY: the master descriptor is open and owned by this test.
-    unsafe {
-        libc::fcntl(master.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK);
-    }
+    let flags = OFlag::from_bits_retain(fcntl(&master, FcntlArg::F_GETFL)?);
+    fcntl(&master, FcntlArg::F_SETFL(flags | OFlag::O_NONBLOCK))
+        .context("setting nonblocking mode on the PTY master")?;
+    let mut child = cmd.spawn().context("spawning Brush under the test PTY")?;
 
     let read_available = |file: &mut std::fs::File, buffer: &mut Vec<u8>| {
         let mut chunk = [0_u8; 4096];
