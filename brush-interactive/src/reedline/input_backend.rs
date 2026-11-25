@@ -33,8 +33,8 @@ fn completion_menu_selected_match_text_style() -> Style {
     completion_menu_selected_text_style().underline()
 }
 
-fn history_hint_style() -> Style {
-    Style::new().dimmed()
+fn history_hint_style(italics: bool) -> Style {
+    crate::styles::with_optional_italics(Style::new().dimmed(), italics)
 }
 
 struct TerminalModes(Vec<u8>);
@@ -111,6 +111,7 @@ impl ReedlineInputBackend {
         };
         let syntax_highlighter = highlighter::ReedlineHighlighter {
             shell: shell_ref.clone(),
+            italics: options.italics,
         };
         let history = history::ReedlineHistory {
             shell: shell_ref.clone(),
@@ -138,7 +139,10 @@ impl ReedlineInputBackend {
                 .with_selected_match_text_style(completion_menu_selected_match_text_style()),
         );
 
-        let hinter = readline::HistoryHinter::new(readline_session.clone(), history_hint_style());
+        let hinter = readline::HistoryHinter::new(
+            readline_session.clone(),
+            history_hint_style(options.italics),
+        );
 
         // Instantiate reedline with some defaults and hand it ownership of
         // the helpers.
@@ -396,12 +400,13 @@ mod tests {
 
     #[test]
     fn history_hint_style_is_theme_adaptive() {
-        let style = history_hint_style();
-
-        assert_eq!(style.foreground, None);
-        assert_eq!(style.background, None);
-        assert!(!style.is_italic);
-        assert!(style.is_dimmed);
+        for italics in [false, true] {
+            let style = history_hint_style(italics);
+            assert_eq!(style.foreground, None);
+            assert_eq!(style.background, None);
+            assert_eq!(style.is_italic, italics);
+            assert!(style.is_dimmed);
+        }
     }
 
     #[test]

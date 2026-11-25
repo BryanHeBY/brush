@@ -100,6 +100,14 @@
           ],
           "default": null
         },
+        "italics": {
+          "description": "Allow italics in syntax highlighting and history suggestions.",
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "default": null
+        },
         "syntax-highlighting": {
           "description": "Enable syntax highlighting in the input line.",
           "type": [

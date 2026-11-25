@@ -59,6 +59,7 @@ User interface settings.
 | Setting               | Type    | Default | CLI flag                | Description                                  |
 |-----------------------|---------|---------|-------------------------|----------------------------------------------|
 | `syntax-highlighting` | boolean | see below | `--enable-highlighting` | Enable syntax highlighting in the input line |
+| `italics` | boolean | `false` | | Allow italics in syntax highlighting and Reedline history suggestions |
 | `history-suggestion-navigation` | boolean | `false` | | Browse visible history suggestions with Up and Down and accept with Right in the `reedline` backend |
 
 > The default value of `syntax-highlighting` depends on how `brush-shell`
@@ -68,6 +69,9 @@ User interface settings.
 
 Syntax highlighting is supported by the `reedline` and `vt` input backends.
 The `--disable-color` flag also disables syntax highlighting.
+Options such as `-l` and `--color` are orange (`#FFB178`). Set `italics = true` to
+also use italics for options, shell keywords, operators, and Reedline history
+suggestions. This setting does not alter your prompt or Tab completion menu.
 
 `history-suggestion-navigation` lets Up and Down preview older or newer
 history matches at the end of an input line. The entire draft is the prefix,

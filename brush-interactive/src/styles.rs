@@ -28,7 +28,7 @@ fn quoted() -> Style {
 }
 
 fn operator() -> Style {
-    Style::new().fg(Color::Default).italic()
+    Style::new().fg(Color::Default)
 }
 
 fn assignment() -> Style {
@@ -36,7 +36,7 @@ fn assignment() -> Style {
 }
 
 fn hyphen_option() -> Style {
-    Style::new().fg(Color::Default).italic()
+    Style::new().fg(Color::Rgb(255, 177, 120))
 }
 
 fn function() -> Style {
@@ -44,7 +44,7 @@ fn function() -> Style {
 }
 
 fn keyword() -> Style {
-    Style::new().bold().fg(Color::LightYellow).italic()
+    Style::new().bold().fg(Color::LightYellow)
 }
 
 fn builtin() -> Style {
@@ -67,8 +67,14 @@ fn unknown_command() -> Style {
     Style::new().bold().fg(Color::Default)
 }
 
-pub(crate) fn kind_to_style(kind: highlighting::HighlightKind) -> Style {
-    match kind {
+pub(crate) const fn with_optional_italics(style: Style, italics: bool) -> Style {
+    if italics { style.italic() } else { style }
+}
+
+pub(crate) fn kind_to_style(kind: highlighting::HighlightKind, italics: bool) -> Style {
+    use highlighting::HighlightKind::{HyphenOption, Keyword, Operator};
+
+    let style = match kind {
         highlighting::HighlightKind::Default => default(),
         highlighting::HighlightKind::Comment => comment(),
         highlighting::HighlightKind::Arithmetic => arithmetic(),
@@ -85,5 +91,33 @@ pub(crate) fn kind_to_style(kind: highlighting::HighlightKind) -> Style {
         highlighting::HighlightKind::ExternalCommand => external_command(),
         highlighting::HighlightKind::NotFoundCommand => not_found_command(),
         highlighting::HighlightKind::UnknownCommand => unknown_command(),
+    };
+    with_optional_italics(
+        style,
+        italics && matches!(kind, Operator | HyphenOption | Keyword),
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use highlighting::HighlightKind::{Builtin, HyphenOption, Keyword, Operator};
+
+    #[test]
+    fn italics_do_not_change_the_palette() {
+        for (kind, fg, supports_italics) in [
+            (HyphenOption, Color::Rgb(255, 177, 120), true),
+            (Operator, Color::Default, true),
+            (Keyword, Color::LightYellow, true),
+            (Builtin, Color::Green, false),
+        ] {
+            let plain = kind_to_style(kind, false);
+            let opted_in = kind_to_style(kind, true);
+            assert!(!plain.is_italic);
+            assert_eq!(opted_in.is_italic, supports_italics);
+            assert_eq!(plain.foreground, Some(fg));
+            assert_eq!(opted_in.foreground, Some(fg));
+            assert_eq!(plain.is_bold, opted_in.is_bold);
+        }
     }
 }

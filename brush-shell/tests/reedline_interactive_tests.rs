@@ -1109,6 +1109,43 @@ fn readline_history_edits_match_bash() -> anyhow::Result<()> {
 
 #[cfg(target_os = "linux")]
 #[test]
+fn reedline_italics_toggle_covers_options_and_history_suggestions() -> anyhow::Result<()> {
+    for italics in [false, true] {
+        let config = format!("[ui]\nsyntax-highlighting = true\nitalics = {italics}\n");
+        for_readline_shell_with_config("", Some(&config), |shell| {
+            if shell.bash {
+                return Ok(());
+            }
+            shell.run_and_expect("echo --color sample", "--color sample")?;
+            shell.expect(FRAME_END)?;
+            shell.session.send("echo --color sa")?;
+            // nu-ansi-term can emit padded ANSI attributes with gnu_legacy.
+            let option = if italics {
+                r"\x1b\[0?3;38;2;255;177;120m"
+            } else {
+                r"\x1b\[38;2;255;177;120m"
+            };
+            let hint = if italics {
+                r"\x1b\[0?2;0?3m"
+            } else {
+                r"\x1b\[0?2m"
+            };
+            shell
+                .session
+                .expect(expectrl::Regex(&format!("{option}--color")))?;
+            shell
+                .session
+                .expect(expectrl::Regex(&format!("{hint}mple")))?;
+            shell.session.send("\x03")?;
+            shell.prompt()?;
+            Ok(())
+        })?;
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+#[test]
 fn readline_history_arrows_keep_suggestions_separate() -> anyhow::Result<()> {
     const HINT: &str = "\x1b[2m";
     for_readline_shell_with_config(

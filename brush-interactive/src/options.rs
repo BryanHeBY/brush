@@ -27,6 +27,9 @@ pub struct UIOptions {
     /// Whether to disable syntax highlighting.
     #[builder(default)]
     pub disable_highlighting: bool,
+    /// Whether syntax highlighting and history suggestions may use italics.
+    #[builder(default)]
+    pub italics: bool,
     /// Whether Up and Down browse visible history suggestions before inserting them.
     #[builder(default)]
     pub history_suggestion_navigation: bool,

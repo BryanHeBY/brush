@@ -15,26 +15,27 @@ use expectrl::Expect;
 
 #[test]
 fn vt_highlighting_respects_cli_and_config() -> anyhow::Result<()> {
-    for (config_enabled, flags, expected) in [
-        (Some(false), vec![], false),
-        (None, vec!["--enable-highlighting"], true),
-        (Some(true), vec![], true),
-        (Some(true), vec!["--disable-color"], false),
+    for (config_enabled, italics, flags, expected) in [
+        (Some(false), true, vec![], false),
+        (None, false, vec!["--enable-highlighting"], true),
+        (Some(true), false, vec![], true),
+        (Some(true), true, vec![], true),
+        (Some(true), true, vec!["--disable-color"], false),
         (
             None,
+            false,
             vec!["--enable-highlighting", "--disable-color"],
             false,
         ),
     ] {
         let config_dir = tempfile::tempdir()?;
         let config_path = config_dir.path().join("config.toml");
-        std::fs::write(
-            &config_path,
-            config_enabled.map_or_else(
-                || "[ui]\n".to_owned(),
-                |enabled| format!("[ui]\nsyntax-highlighting = {enabled}\n"),
-            ),
-        )?;
+        let mut config = format!("[ui]\nitalics = {italics}\n");
+        if let Some(enabled) = config_enabled {
+            use std::fmt::Write as _;
+            writeln!(config, "syntax-highlighting = {enabled}")?;
+        }
+        std::fs::write(&config_path, config)?;
         let mut cmd = std::process::Command::new(assert_cmd::cargo::cargo_bin!("brush"));
         cmd.args(["--norc", "--noprofile", "--input-backend=vt", "--config"])
             .arg(&config_path)
@@ -46,7 +47,7 @@ fn vt_highlighting_respects_cli_and_config() -> anyhow::Result<()> {
         session.expect("brush> ").context("VT prompt missing")?;
         // Interrupt after typing so the captured bytes contain the redraws but
         // no command output that could supply its own color sequences.
-        session.send("echo 'color' $HOME")?;
+        session.send("echo --color 'value' $HOME | cat")?;
         session.send("\x03")?;
         let captured = session.expect("^C")?;
         let output = String::from_utf8_lossy(captured.before());
@@ -55,6 +56,14 @@ fn vt_highlighting_respects_cli_and_config() -> anyhow::Result<()> {
             expected,
             "config={config_enabled:?}, flags={flags:?}: {output:?}"
         );
+        let plain_option = output.contains("\x1b[38;2;255;177;120m--color");
+        // ANSI parameters may be padded when nu-ansi-term's gnu_legacy feature is on.
+        let italic_option = output.contains("\x1b[03;38;2;255;177;120m--color")
+            || output.contains("\x1b[3;38;2;255;177;120m--color");
+        let italic_operator = output.contains("\x1b[03;39m|") || output.contains("\x1b[3;39m|");
+        assert_eq!(plain_option, expected && !italics);
+        assert_eq!(italic_option, expected && italics);
+        assert_eq!(italic_operator, expected && italics);
         session.expect("brush> ").context("VT prompt missing")?;
         session.send("\x04")?;
         session.expect(expectrl::Eof)?;

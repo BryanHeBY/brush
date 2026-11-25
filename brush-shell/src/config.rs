@@ -45,6 +45,9 @@ pub struct UiConfig {
     #[serde(rename = "syntax-highlighting")]
     pub syntax_highlighting: Option<bool>,
 
+    /// Allow italics in syntax highlighting and history suggestions.
+    pub italics: Option<bool>,
+
     /// Browse visible history suggestions with Up and Down and accept with Right.
     #[serde(rename = "history-suggestion-navigation")]
     pub history_suggestion_navigation: Option<bool>,
@@ -145,6 +148,7 @@ impl Config {
             .disable_bracketed_paste(args.disable_bracketed_paste)
             .disable_color(args.disable_color)
             .disable_highlighting(!enable_highlighting)
+            .italics(self.ui.italics.unwrap_or_default())
             .history_suggestion_navigation(
                 self.ui.history_suggestion_navigation.unwrap_or_default(),
             )
@@ -397,6 +401,19 @@ mod tests {
         let config: Config = toml::from_str(toml).unwrap();
         assert_eq!(config.ui.syntax_highlighting, Some(true));
         assert_eq!(config.experimental.zsh_hooks, Some(false));
+    }
+
+    #[test]
+    fn italics_are_opt_in() {
+        let args = CommandLineArgs::default_values();
+        for (setting, expected) in [
+            ("", false),
+            ("italics = false", false),
+            ("italics = true", true),
+        ] {
+            let config: Config = toml::from_str(&format!("[ui]\n{setting}")).unwrap();
+            assert_eq!(config.to_ui_options(&args).italics, expected);
+        }
     }
 
     #[test]

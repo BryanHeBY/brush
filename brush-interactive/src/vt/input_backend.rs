@@ -56,6 +56,7 @@ impl<T: Terminal> VtInputBackend<T> {
     #[must_use]
     pub const fn with_ui_options(mut self, options: &crate::UIOptions) -> Self {
         self.reader.highlighting = !options.disable_highlighting && !options.disable_color;
+        self.reader.italics = options.italics;
         self
     }
 

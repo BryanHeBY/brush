@@ -191,6 +191,7 @@ impl<'a> LineEditor<'a> {
         &mut self,
         shell: &brush_core::Shell<impl brush_core::ShellExtensions>,
         program: &str,
+        italics: bool,
     ) {
         let line = if program.is_empty() {
             std::borrow::Cow::Borrowed(self.buffer.text())
@@ -202,7 +203,8 @@ impl<'a> LineEditor<'a> {
             &line,
             program.len() + self.buffer.cursor(),
         );
-        self.renderer.set_highlighting(&highlighted, program.len());
+        self.renderer
+            .set_highlighting(&highlighted, program.len(), italics);
     }
 
     /// Draws the line, replacing what was drawn before.

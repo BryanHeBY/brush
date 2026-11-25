@@ -6,6 +6,7 @@ use nu_ansi_term::Style;
 
 pub(crate) struct ReedlineHighlighter<SE: brush_core::ShellExtensions> {
     pub shell: refs::ShellRef<SE>,
+    pub italics: bool,
 }
 
 pub(crate) struct PlainTextHighlighter;
@@ -46,7 +47,7 @@ impl<SE: brush_core::ShellExtensions> reedline::Highlighter for ReedlineHighligh
             .take_while(|span| span.range.start < line.len())
         {
             if let Some(text) = line.get(span.range.start..span.range.end.min(line.len())) {
-                styled.push((kind_to_style(span.kind), text.to_owned()));
+                styled.push((kind_to_style(span.kind, self.italics), text.to_owned()));
             }
         }
 

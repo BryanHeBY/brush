@@ -33,6 +33,7 @@ const MAX_MACRO_EXPANSIONS: usize = 100;
 pub(crate) struct LineReader {
     pub style: Style,
     pub highlighting: bool,
+    pub italics: bool,
     pub bindings: Arc<Mutex<VtKeyBindings>>,
     /// The line being edited when a bound key was pressed, while its command runs.
     pub bound_line: Option<(String, usize)>,
@@ -226,7 +227,7 @@ impl LineReader {
     ) {
         if self.highlighting && self.style == Style::Vt {
             let shell = shell.lock().await;
-            editor.highlight(&shell, program);
+            editor.highlight(&shell, program, self.italics);
         }
     }
 

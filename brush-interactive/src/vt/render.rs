@@ -27,6 +27,7 @@ impl Renderer {
         &mut self,
         highlighted: &crate::highlighting::Highlighted<'_>,
         start: usize,
+        italics: bool,
     ) {
         if let Self::Vt(renderer) = self {
             let mut styled = String::new();
@@ -44,7 +45,7 @@ impl Renderer {
                 let _ = write!(
                     styled,
                     "{}",
-                    crate::styles::kind_to_style(span.kind).paint(shown)
+                    crate::styles::kind_to_style(span.kind, italics).paint(shown)
                 );
             }
             let line = highlighted.line().get(start..).unwrap_or_default();
@@ -886,7 +887,7 @@ mod tests {
                     let highlighted = crate::highlighting::highlight_command(&shell, text, cursor);
                     let mut plain = Renderer::new(Style::Vt);
                     let mut colored = Renderer::new(Style::Vt);
-                    colored.set_highlighting(&highlighted, 0);
+                    colored.set_highlighting(&highlighted, 0, false);
                     let mut plain_out = vec![];
                     let mut colored_out = vec![];
                     plain.draw(&mut plain_out, "$ ", text, cursor, columns)?;
