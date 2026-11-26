@@ -1311,10 +1311,12 @@ impl Reedline {
         Ok(())
     }
 
-    /// Print the history session id
+    /// Output the history session id to the terminal
     pub fn print_history_session_id(&mut self) -> Result<()> {
-        println!("History Session Id: {:?}", self.get_history_session_id());
-        Ok(())
+        self.print_line(&format!(
+            "History Session Id: {:?}",
+            self.get_history_session_id()
+        ))
     }
 
     /// Toggle between having a history that uses the history session id and one that does not
@@ -1536,8 +1538,8 @@ impl Reedline {
         self.editor.get_selection()
     }
 
-    /// Writes `msg` to the terminal with a following carriage return and newline,
-    /// its control characters shown rather than sent
+    /// Writes `msg` to the terminal with a following line break, its control
+    /// characters shown rather than sent
     fn print_line(&mut self, msg: &str) -> Result<()> {
         self.painter.paint_line(&escape_control(msg))
     }
@@ -3960,9 +3962,6 @@ impl Reedline {
                 }
             });
 
-        // Needs to add return carriage to newlines because when not in raw mode
-        // some OS don't fully return the carriage
-
         let mut lines = if hint_replaces_closers {
             // The exit path reprints what follows the cursor, which is still
             // the closers, not the hint drawn over them.
@@ -5914,8 +5913,10 @@ mod tests {
         assert_send::<Reedline>();
     }
 
-    #[test]
-    fn test_cursor_position_after_multiline_history_navigation() {
+    #[rstest]
+    #[case::lf("\n")]
+    #[case::crlf("\r\n")]
+    fn test_cursor_position_after_multiline_history_navigation(#[case] line_ending: &str) {
         // Test for https://github.com/nushell/reedline/pull/899
         // Ensure that after navigating to a multiline history entry and then
         // running edit commands, the cursor doesn't jump unexpectedly.
@@ -5925,8 +5926,9 @@ mod tests {
         let mut reedline = Reedline::create();
 
         // Add a multiline entry to history
-        let multiline_command = "echo 'line 1'\necho 'line 2'\necho 'line 3'";
-        let history_item = HistoryItem::from_command_line(multiline_command);
+        let first_line = "echo 'line 1'";
+        let multiline_command = [first_line, "echo 'line 2'", "echo 'line 3'"].join(line_ending);
+        let history_item = HistoryItem::from_command_line(&multiline_command);
         reedline
             .history
             .save(history_item)
@@ -5943,8 +5945,7 @@ mod tests {
 
         // After the fix, previous_history() positions cursor at end of first line
         // (after move_to_start + move_to_line_end)
-        let first_line_end = multiline_command.find('\n').unwrap();
-        assert_eq!(initial_insertion_point, first_line_end);
+        assert_eq!(initial_insertion_point, first_line.len());
 
         // Now simulate pressing the right arrow key, which should move cursor right
         // Without the fix, set_buffer() would be called and reset the insertion point,
@@ -5954,8 +5955,11 @@ mod tests {
 
         let after_move_insertion_point = reedline.current_insertion_point();
 
-        // The cursor should have moved right by 1 from where it was
-        assert_eq!(after_move_insertion_point, initial_insertion_point + 1);
+        // The cursor steps over the whole line ending in one move.
+        assert_eq!(
+            after_move_insertion_point,
+            initial_insertion_point + line_ending.len()
+        );
 
         // The buffer should still be unchanged
         assert_eq!(reedline.current_buffer_contents(), multiline_command);

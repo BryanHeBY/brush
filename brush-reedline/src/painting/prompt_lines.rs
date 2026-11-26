@@ -1,6 +1,6 @@
 use super::utils::{
-    coerce_crlf, escape_control, escape_control_keep_sgr, estimate_required_lines, expand_tabs,
-    line_width, resolve_wrap, wrap_position,
+    escape_control, escape_control_keep_sgr, estimate_required_lines, expand_tabs, line_width,
+    resolve_wrap, wrap_position,
 };
 use crate::{
     Prompt, PromptHistorySearch,
@@ -17,7 +17,7 @@ pub(crate) struct PromptLines<'prompt> {
     pub(crate) prompt_indicator: Cow<'prompt, str>,
     pub(crate) before_cursor: Cow<'prompt, str>,
     pub(crate) after_cursor: Cow<'prompt, str>,
-    pub(crate) hint: Cow<'prompt, str>,
+    pub(crate) hint: &'prompt str,
     pub(crate) right_prompt_on_last_line: bool,
     /// What the exit path reprints after the cursor, when that is not
     /// `after_cursor`: a history hint drawn in place of trailing auto-pair
@@ -53,17 +53,14 @@ impl<'prompt> PromptLines<'prompt> {
             None => prompt.render_prompt_indicator(prompt_mode),
         };
 
-        let before_cursor = coerce_crlf(before_cursor);
-        let after_cursor = coerce_crlf(after_cursor);
-        let hint = coerce_crlf(hint);
         let right_prompt_on_last_line = prompt.right_prompt_on_last_line();
 
         Self {
             prompt_str_left,
             prompt_str_right,
             prompt_indicator,
-            before_cursor,
-            after_cursor,
+            before_cursor: Cow::Borrowed(before_cursor),
+            after_cursor: Cow::Borrowed(after_cursor),
             hint,
             right_prompt_on_last_line,
             exit_after_cursor: None,
@@ -84,7 +81,7 @@ impl<'prompt> PromptLines<'prompt> {
             && !self.after_cursor.contains('\n')
             && line_width(&before) + line_width(&after) <= available
         {
-            self.hint = Cow::Borrowed("");
+            self.hint = "";
             return;
         }
 
@@ -135,7 +132,7 @@ impl<'prompt> PromptLines<'prompt> {
         };
         self.before_cursor = Cow::Owned(format!("{left}{}", &before[start..]));
         self.after_cursor = Cow::Owned(format!("{}{right}", &after[..end]));
-        self.hint = Cow::Borrowed("");
+        self.hint = "";
     }
 
     /// Set the status line drawn below the buffer. See [`Self::status`].
@@ -179,14 +176,14 @@ impl<'prompt> PromptLines<'prompt> {
         ) {
             (_, false) => Cow::Borrowed(&self.status),
             (true, true) => Cow::Borrowed(&self.footer),
-            (false, true) => Cow::Owned(format!("{}\r\n{}", self.status, self.footer)),
+            (false, true) => Cow::Owned(format!("{}\n{}", self.status, self.footer)),
         }
     }
 
     /// Set what the exit path reprints after the cursor in place of
     /// `after_cursor`. See [`Self::exit_after_cursor`].
     pub(crate) fn with_exit_after_cursor(mut self, after_cursor: &'prompt str) -> Self {
-        self.exit_after_cursor = Some(coerce_crlf(after_cursor));
+        self.exit_after_cursor = Some(Cow::Borrowed(after_cursor));
         self
     }
 
@@ -209,7 +206,7 @@ impl<'prompt> PromptLines<'prompt> {
         if !before_cursor {
             input += &self.after_cursor;
             if menu.is_none() {
-                input += &self.hint;
+                input += self.hint;
             }
         }
 
@@ -270,7 +267,7 @@ impl<'prompt> PromptLines<'prompt> {
         let first_line_left_prompt = self.prompt_str_left.lines().next();
         let last_line_left_prompt = self.prompt_str_left.lines().last();
 
-        let prompt_lines_total = self.before_cursor.to_string() + &self.after_cursor + &self.hint;
+        let prompt_lines_total = self.before_cursor.to_string() + &self.after_cursor + self.hint;
         let prompt_lines_first = prompt_lines_total.lines().next();
 
         let mut estimate = 0; // space in front of the input
@@ -319,7 +316,7 @@ fn rows_of(text: &str, terminal_columns: u16) -> u16 {
         .unwrap_or(u16::MAX)
 }
 
-/// `text` as the status line draws it, lines joined by `\r\n`. See
+/// `text` as the status line draws it, lines joined by `\n`. See
 /// [`PromptLines::with_status`].
 fn drawn_rows(text: &str, use_ansi_coloring: bool) -> String {
     let mut drawn = String::with_capacity(text.len());
@@ -327,7 +324,7 @@ fn drawn_rows(text: &str, use_ansi_coloring: bool) -> String {
     // break never reaches the escape.
     for (index, line) in text.trim_end_matches(['\r', '\n']).lines().enumerate() {
         if index > 0 {
-            drawn.push_str("\r\n");
+            drawn.push('\n');
         }
         let line = if use_ansi_coloring {
             escape_control_keep_sgr(line)
@@ -475,7 +472,7 @@ mod tests {
             prompt_indicator: Cow::Borrowed(prompt_indicator),
             before_cursor: Cow::Borrowed(before_cursor),
             after_cursor: Cow::Borrowed(""),
-            hint: Cow::Borrowed(""),
+            hint: "",
             right_prompt_on_last_line: false,
             exit_after_cursor: None,
             status: Cow::Borrowed(""),
@@ -513,7 +510,7 @@ mod tests {
             prompt_indicator: Cow::Borrowed(prompt_indicator),
             before_cursor: Cow::Borrowed(before_cursor),
             after_cursor: Cow::Borrowed(after_cursor),
-            hint: Cow::Borrowed(""),
+            hint: "",
             right_prompt_on_last_line: false,
             exit_after_cursor: None,
             status: Cow::Borrowed(""),
@@ -559,7 +556,7 @@ mod tests {
             prompt_indicator: Cow::Borrowed(prompt_indicator),
             before_cursor: Cow::Borrowed(before_cursor),
             after_cursor: Cow::Borrowed(""),
-            hint: Cow::Borrowed(""),
+            hint: "",
             right_prompt_on_last_line: false,
             exit_after_cursor: None,
             status: Cow::Borrowed(""),
@@ -588,7 +585,7 @@ mod tests {
             prompt_indicator: Cow::Borrowed(prompt_indicator),
             before_cursor: Cow::Borrowed(""),
             after_cursor: Cow::Borrowed(""),
-            hint: Cow::Borrowed(""),
+            hint: "",
             right_prompt_on_last_line: false,
             exit_after_cursor: None,
             status: Cow::Borrowed(""),
@@ -605,7 +602,7 @@ mod tests {
             prompt_indicator: Cow::Borrowed(""),
             before_cursor: Cow::Borrowed(""),
             after_cursor: Cow::Borrowed(""),
-            hint: Cow::Borrowed(""),
+            hint: "",
             right_prompt_on_last_line: false,
             exit_after_cursor: None,
             status: Cow::Borrowed(""),
@@ -617,8 +614,8 @@ mod tests {
     /// The footer goes on the rows after the status line, drawn like it, and
     /// neither side adds a blank row when the other is empty.
     #[rstest]
-    #[case::below_status("status", "footer", "status\r\nfooter")]
-    #[case::status_trailing_newline("status\n", "footer", "status\r\nfooter")]
+    #[case::below_status("status", "footer", "status\nfooter")]
+    #[case::status_trailing_newline("status\n", "footer", "status\nfooter")]
     #[case::no_status("", "footer", "footer")]
     #[case::no_footer("status", "", "status")]
     #[case::footer_only_newlines("status", "\n\n", "status")]
@@ -659,9 +656,9 @@ mod tests {
 
     #[rstest]
     #[case::trailing_line_breaks("a\n\r\n", "a", true)]
-    #[case::inner_newline("a\nb", "a\r\nb", true)]
-    #[case::inner_crlf("a\r\nb", "a\r\nb", true)]
-    #[case::inner_blank_line("a\n\nb", "a\r\n\r\nb", true)]
+    #[case::inner_newline("a\nb", "a\nb", true)]
+    #[case::inner_crlf("a\r\nb", "a\nb", true)]
+    #[case::inner_blank_line("a\n\nb", "a\n\nb", true)]
     #[case::inner_carriage_return("a\rb", "a^Mb", true)]
     #[case::control_sequence("\x1b[2Kls", "^[[2Kls", true)]
     #[case::sgr_kept("\x1b[31mred\x1b[0m", "\x1b[31mred\x1b[0m", true)]
