@@ -150,6 +150,8 @@ fn forward_word_len(suffix: &str) -> usize {
 
 #[derive(Clone, Copy)]
 pub(super) enum Action {
+    ArrowHistoryBackward,
+    ArrowHistoryForward,
     HistoryBackward,
     HistoryForward,
     PreviousHistory,
@@ -161,7 +163,9 @@ pub(super) enum Action {
 }
 
 impl Action {
-    const ALL: [Self; 8] = [
+    const ALL: [Self; 10] = [
+        Self::ArrowHistoryBackward,
+        Self::ArrowHistoryForward,
         Self::HistoryBackward,
         Self::HistoryForward,
         Self::PreviousHistory,
@@ -174,6 +178,8 @@ impl Action {
 
     const fn name(self) -> &'static str {
         match self {
+            Self::ArrowHistoryBackward => "brush_arrow_history_backward",
+            Self::ArrowHistoryForward => "brush_arrow_history_forward",
             Self::HistoryBackward => "brush_history_search_backward",
             Self::HistoryForward => "brush_history_search_forward",
             Self::PreviousHistory => "brush_previous_history",
@@ -185,8 +191,9 @@ impl Action {
         }
     }
 
-    const fn function(self) -> InputFunction {
-        match self {
+    const fn function(self) -> Option<InputFunction> {
+        Some(match self {
+            Self::ArrowHistoryBackward | Self::ArrowHistoryForward => return None,
             Self::HistoryBackward => InputFunction::HistorySearchBackward,
             Self::HistoryForward => InputFunction::HistorySearchForward,
             Self::PreviousHistory => InputFunction::PreviousHistory,
@@ -195,13 +202,13 @@ impl Action {
             Self::ListCompletions => InputFunction::PossibleCompletions,
             Self::MenuForward => InputFunction::MenuComplete,
             Self::MenuBackward => InputFunction::MenuCompleteBackward,
-        }
+        })
     }
 
     pub(super) fn for_function(function: &InputFunction) -> Option<Self> {
         Self::ALL
             .into_iter()
-            .find(|action| action.function() == *function)
+            .find(|action| action.function().as_ref() == Some(function))
     }
 
     pub(super) fn event(self) -> reedline::ReedlineEvent {
@@ -224,7 +231,7 @@ impl Action {
         Self::ALL
             .into_iter()
             .find(|action| action.name() == name)
-            .map(Self::function)
+            .and_then(Self::function)
     }
 }
 
@@ -553,19 +560,19 @@ impl ReadlineSession {
                     .is_some_and(|hint| !hint.suffix.is_empty()))
         {
             match event {
-                ReedlineEvent::Up => return Some(Action::HistoryBackward.event()),
-                ReedlineEvent::Down => return Some(Action::HistoryForward.event()),
+                ReedlineEvent::Up => return Some(Action::ArrowHistoryBackward.event()),
+                ReedlineEvent::Down => return Some(Action::ArrowHistoryForward.event()),
                 ReedlineEvent::UntilFound(events) => match events.as_slice() {
                     [ReedlineEvent::MenuUp, ReedlineEvent::Up] => {
                         return Some(ReedlineEvent::UntilFound(vec![
                             ReedlineEvent::MenuUp,
-                            Action::HistoryBackward.event(),
+                            Action::ArrowHistoryBackward.event(),
                         ]));
                     }
                     [ReedlineEvent::MenuDown, ReedlineEvent::Down] => {
                         return Some(ReedlineEvent::UntilFound(vec![
                             ReedlineEvent::MenuDown,
-                            Action::HistoryForward.event(),
+                            Action::ArrowHistoryForward.event(),
                         ]));
                     }
                     _ => {}
@@ -586,13 +593,13 @@ impl ReadlineSession {
             let up = || {
                 ReedlineEvent::UntilFound(vec![
                     ReedlineEvent::Edit(vec![EditCommand::MoveLineUp { select: false }]),
-                    Action::HistoryBackward.event(),
+                    Action::ArrowHistoryBackward.event(),
                 ])
             };
             let down = || {
                 ReedlineEvent::UntilFound(vec![
                     ReedlineEvent::Edit(vec![EditCommand::MoveLineDown { select: false }]),
-                    Action::HistoryForward.event(),
+                    Action::ArrowHistoryForward.event(),
                 ])
             };
             return match event {
@@ -641,8 +648,8 @@ impl ReadlineSession {
             return false;
         }
         let backward = match action {
-            Action::HistoryBackward => true,
-            Action::HistoryForward => false,
+            Action::ArrowHistoryBackward | Action::HistoryBackward => true,
+            Action::ArrowHistoryForward | Action::HistoryForward => false,
             _ => return false,
         };
         // A draft remains editable even when there is no hint at the cursor.
@@ -691,7 +698,14 @@ impl ReadlineSession {
     ) -> Option<Buffer> {
         self.cycle = None;
         self.last_completion = None;
-        let backward = matches!(action, Action::HistoryBackward | Action::PreviousHistory);
+        let backward = matches!(
+            action,
+            Action::ArrowHistoryBackward | Action::HistoryBackward | Action::PreviousHistory
+        );
+        let arrow = matches!(
+            action,
+            Action::ArrowHistoryBackward | Action::ArrowHistoryForward
+        );
         let plain = matches!(action, Action::PreviousHistory | Action::NextHistory);
         // A recalled line may return to the same spelling after an edit;
         // its text revision still ends the old traversal, unlike a cursor move.
@@ -753,7 +767,9 @@ impl ReadlineSession {
                 cursor: if self.options.history_preserve_point {
                     item.command_line
                         .floor_char_boundary(start_cursor.min(item.command_line.len()))
-                } else if prefix.is_empty() {
+                } else if arrow || prefix.is_empty() {
+                    // Ordinary arrows keep the saved prefix for navigation,
+                    // but an edit should start at the visible end of the line.
                     item.command_line.len()
                 } else {
                     matched_prefix_len(&item.command_line, prefix, self.options.search_ignore_case)?
@@ -932,7 +948,9 @@ pub(super) fn install<SE: brush_core::ShellExtensions>(
         };
         let menu = if matches!(
             action,
-            Action::HistoryBackward
+            Action::ArrowHistoryBackward
+                | Action::ArrowHistoryForward
+                | Action::HistoryBackward
                 | Action::HistoryForward
                 | Action::PreviousHistory
                 | Action::NextHistory
@@ -1005,7 +1023,9 @@ impl<SE: brush_core::ShellExtensions> reedline::Menu for ActionMenu<SE> {
             tokio::runtime::Handle::current().block_on(async {
                 let mut shell = self.shell.lock().await;
                 let result = match self.action {
-                    Action::HistoryBackward
+                    Action::ArrowHistoryBackward
+                    | Action::ArrowHistoryForward
+                    | Action::HistoryBackward
                     | Action::HistoryForward
                     | Action::PreviousHistory
                     | Action::NextHistory => {

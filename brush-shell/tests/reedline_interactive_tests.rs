@@ -1236,27 +1236,46 @@ fn readline_prefix_history_edits_restart_at_the_latest_match() -> anyhow::Result
                         shell.run_and_expect(&format!("echo {value}"), &value)?;
                     }
                 }
+                // Explicit search keeps its prefix point. Reposition the
+                // default arrows there only for the tests that edit that prefix.
+                let to_prefix = if inputrc.contains("history-search-backward") {
+                    String::new()
+                } else {
+                    LEFT.repeat("nch-new".len())
+                };
                 for (key, actions, expected) in [
                     ('a', format!("{UP}{UP}"), "branch-old"),
-                    ('b', format!("{UP}{DELETE}{DELETE}{UP}"), "bzero-latest"),
                     (
-                        'c',
-                        format!("{UP}{UP}{DELETE}{DELETE}z{UP}"),
+                        'b',
+                        format!("{UP}{to_prefix}{DELETE}{DELETE}{UP}"),
                         "bzero-latest",
                     ),
-                    ('d', format!("{UP}{UP}{DELETE}{DELETE}{DOWN}"), "bnch-old"),
+                    (
+                        'c',
+                        format!("{UP}{UP}{to_prefix}{DELETE}{DELETE}z{UP}"),
+                        "bzero-latest",
+                    ),
+                    (
+                        'd',
+                        format!("{UP}{UP}{to_prefix}{DELETE}{DELETE}{DOWN}"),
+                        "bnch-old",
+                    ),
                     ('e', format!("{UP}{LEFT}{LEFT}{UP}"), "branch-old"),
                     (
                         'f',
-                        format!("{UP}{DELETE}{DELETE}X{UP}{DELETE}{UP}"),
+                        format!("{UP}{to_prefix}{DELETE}{DELETE}X{UP}{DELETE}{UP}"),
                         "bzero-latest",
                     ),
                     ('g', format!("{UP}{UP}{DOWN}{DOWN}"), "bra"),
-                    ('h', format!("{UP}{UP}X{UNDO}{UP}"), "branch-new"),
-                    ('j', format!("{UP}{UP}X{DELETE}{UP}"), "branch-new"),
+                    ('h', format!("{UP}{UP}{to_prefix}X{UNDO}{UP}"), "branch-new"),
+                    (
+                        'j',
+                        format!("{UP}{UP}{to_prefix}X{DELETE}{UP}"),
+                        "branch-new",
+                    ),
                     (
                         'k',
-                        format!("{UP}{UP}{DELETE}{DELETE}\x1b[200~z\x1b[201~{UP}"),
+                        format!("{UP}{UP}{to_prefix}{DELETE}{DELETE}\x1b[200~z\x1b[201~{UP}"),
                         "bzero-latest",
                     ),
                 ] {
@@ -1275,6 +1294,39 @@ fn readline_prefix_history_edits_restart_at_the_latest_match() -> anyhow::Result
         )?;
     }
     Ok(())
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn default_history_arrows_land_at_end_without_losing_the_prefix() -> anyhow::Result<()> {
+    const UP: &str = "\x1b[A";
+    const DOWN: &str = "\x1b[B";
+    for_readline_shell_with_config(
+        "",
+        Some("[ui]\nhistory-suggestion-navigation = false\n"),
+        |shell| {
+            if shell.bash {
+                return Ok(());
+            }
+            for suffix in ["branch-old", "branch-new", "other-latest"] {
+                shell.run_and_expect(
+                    &format!("echo cursor-{suffix}"),
+                    &format!("cursor-{suffix}"),
+                )?;
+            }
+            shell.run_and_expect(
+                &format!("echo cursor-bra{UP}{UP}{DOWN}X"),
+                "cursor-branch-newX",
+            )?;
+
+            // A forward walk past its newest match restores the original
+            // draft and point, not the end-of-line point used by a recall.
+            shell.run_and_expect(
+                &format!("echo cursor-oTAIL{}{UP}{DOWN}X", "\x1b[D".repeat(4)),
+                "cursor-oXTAIL",
+            )
+        },
+    )
 }
 
 #[cfg(target_os = "linux")]
