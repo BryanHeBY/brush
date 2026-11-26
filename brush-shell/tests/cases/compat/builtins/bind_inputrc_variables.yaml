@@ -1,0 +1,106 @@
+name: "Builtins: bind inputrc variable compatibility"
+cases:
+  - name: "bind inputrc Boolean values and non-Boolean settings"
+    args: ["run.sh"]
+    env: { INPUTRC: /dev/null }
+    removed_default_args: ["--input-backend=basic"]
+    additional_test_args: ["--input-backend=reedline"]
+    test_files:
+      - path: "run.sh"
+        contents: |
+          for value in '' on ON 1 off 0 yes; do
+            bind "set completion-ignore-case $value" 2>/dev/null
+            printf 'completion status=%s\n' "$?"
+            bind "set mark-directories $value" 2>/dev/null
+            printf 'directories status=%s\n' "$?"
+            bind "set mark-symlinked-directories $value" 2>/dev/null
+            printf 'symlinks status=%s\n' "$?"
+            printf 'value=<%s>\n' "$value"
+            bind -v 2>/dev/null | LC_ALL=C grep -E '^set (completion-ignore-case|mark-directories|mark-symlinked-directories) ' | LC_ALL=C sort
+          done
+          bind 'set comment-begin # word' 2>/dev/null
+          bind 'set completion-query-items 17extra' 2>/dev/null
+          bind -v 2>/dev/null | LC_ALL=C grep -E '^set (comment-begin|completion-query-items) ' | LC_ALL=C sort
+
+  - name: "bind inputrc unknown variables warn and continue"
+    args: ["run.sh"]
+    env: { INPUTRC: /dev/null }
+    removed_default_args: ["--input-backend=basic"]
+    additional_test_args: ["--input-backend=reedline"]
+    test_files:
+      - path: "run.sh"
+        contents: |
+          bind 'set brush-unknown-direct on' 2>direct.err
+          printf 'direct status=%s\n' "$?"
+          sed '/warning: line editing not enabled/d' direct.err
+          bind -f settings.inputrc 2>file.err
+          printf 'file status=%s\n' "$?"
+          sed '/warning: line editing not enabled/d' file.err
+          rm -- direct.err file.err
+          bind -v 2>/dev/null | LC_ALL=C grep -E '^set (completion-ignore-case|completion-query-items) ' | LC_ALL=C sort
+      - path: "settings.inputrc"
+        contents: |
+          $include missing.inputrc
+          set brush-unknown-first on
+          set completion-ignore-case on
+          $include other.inputrc
+          set brush-unknown-second off
+          set completion-query-items 37
+      - path: "other.inputrc"
+        contents: |
+          set brush-unknown-included on
+
+  - name: "bind inputrc variable conditions compare without case"
+    args: ["run.sh"]
+    env: { INPUTRC: /dev/null }
+    removed_default_args: ["--input-backend=basic"]
+    additional_test_args: ["--input-backend=reedline"]
+    test_files:
+      - path: "run.sh"
+        contents: |
+          bind -f conditions.inputrc 2>/dev/null
+          printf 'status=%s\n' "$?"
+          bind -v 2>/dev/null | LC_ALL=C grep -E '^set (bell-style|completion-ignore-case|completion-prefix-display-length|completion-query-items|search-ignore-case) ' | LC_ALL=C sort
+      - path: "conditions.inputrc"
+        contents: |
+          set completion-ignore-case On
+          set bell-style none
+          set bell-style Audible
+          $if completion-ignore-case = On
+          set completion-query-items 71
+          $else
+          set completion-query-items 72
+          $endif
+          $if bell-style = Audible
+          set completion-prefix-display-length 81
+          $else
+          set completion-prefix-display-length 82
+          $endif
+          $if bell-style != AUDIBLE
+          set search-ignore-case on
+          $else
+          set search-ignore-case off
+          $endif
+
+  - name: "bind inputrc invalid enum remains an error"
+    args: ["run.sh"]
+    env: { INPUTRC: /dev/null }
+    removed_default_args: ["--input-backend=basic"]
+    additional_test_args: ["--input-backend=reedline"]
+    skip_oracle: true
+    expected_exit_code: 0
+    test_files:
+      - path: "run.sh"
+        contents: |
+          bind 'set bell-style invalid' 2>error
+          test "$?" -ne 0 || exit 1
+          grep 'invalid readline setting: bell-style invalid' error >/dev/null || exit 1
+          bind 'set editing-mode invalid' 2>error
+          test "$?" -ne 0 || exit 1
+          grep 'invalid readline setting: editing-mode invalid' error >/dev/null || exit 1
+          bind -f invalid.inputrc 2>error || exit 1
+          bind -v 2>/dev/null | grep '^set completion-query-items 43$' >/dev/null || exit 1
+      - path: "invalid.inputrc"
+        contents: |
+          set bell-style invalid
+          set completion-query-items 43

@@ -84,7 +84,7 @@ fn read_file(
         source,
     })?;
     stack.push(identity);
-    read_lines(&contents, &path, shell, bindings, stderr, stack);
+    read_lines(&contents, &path, raw_path, shell, bindings, stderr, stack);
     stack.pop();
     Ok(())
 }
@@ -92,12 +92,14 @@ fn read_file(
 fn read_lines(
     contents: &str,
     path: &Path,
+    raw_path: &str,
     shell: &mut Shell<impl ShellExtensions>,
     bindings: &mut dyn KeyBindings,
     stderr: &mut impl Write,
     stack: &mut Vec<PathBuf>,
 ) {
     let mut conditions: Vec<Conditional> = Vec::new();
+    let mut diagnostic_file_active = true;
     for (index, line) in contents.lines().enumerate() {
         let line = line.trim();
         if line.is_empty() || line.starts_with('#') {
@@ -106,8 +108,20 @@ fn read_lines(
         let active = conditions.last().is_none_or(|frame| frame.active());
         let Some(directive) = line.strip_prefix('$') else {
             if active && let Err(err) = apply_readline_input(shell, bindings, line) {
-                tracing::debug!(target: trace_categories::INPUT,
-                    "{}:{}: {err}", path.display(), index + 1);
+                if let BindError::UnknownVariable(name) = err {
+                    if diagnostic_file_active {
+                        let _ = writeln!(
+                            stderr,
+                            "readline: {raw_path}: line {}: {name}: unknown variable name",
+                            index + 1
+                        );
+                    } else {
+                        let _ = writeln!(stderr, "readline: {name}: unknown variable name");
+                    }
+                } else {
+                    tracing::debug!(target: trace_categories::INPUT,
+                        "{}:{}: {err}", path.display(), index + 1);
+                }
             }
             continue;
         };
@@ -138,9 +152,13 @@ fn read_lines(
             "include" => {
                 // Readline interprets relative includes from the shell's working directory.
                 // As with an unreadable optional user init file, a missing include is skipped.
-                if active && let Err(err) = read_file(argument, shell, bindings, stderr, stack) {
-                    tracing::debug!(target: trace_categories::INPUT,
-                        "{}:{}: {err}", path.display(), index + 1);
+                if active {
+                    match read_file(argument, shell, bindings, stderr, stack) {
+                        // Readline stops reporting the parent file after a successful include.
+                        Ok(()) => diagnostic_file_active = false,
+                        Err(err) => tracing::debug!(target: trace_categories::INPUT,
+                            "{}:{}: {err}", path.display(), index + 1),
+                    }
                 }
                 None
             }
@@ -216,8 +234,8 @@ fn matches_condition(
             .into_iter()
             .find(|(variable, _)| *variable == name)
             .is_some_and(|(_, actual)| match operator {
-                "=" | "==" => actual == value,
-                "!=" => actual != value,
+                "=" | "==" => actual.eq_ignore_ascii_case(value),
+                "!=" => !actual.eq_ignore_ascii_case(value),
                 _ => false,
             });
     }

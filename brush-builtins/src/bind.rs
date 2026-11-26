@@ -112,6 +112,10 @@ pub(crate) enum BindError {
     #[error("invalid readline setting: {0}")]
     InvalidSetting(String),
 
+    /// Unknown readline variable.
+    #[error("{0}: unknown variable name")]
+    UnknownVariable(String),
+
     /// An I/O error occurred.
     #[error("I/O error occurred")]
     IoError(#[from] std::io::Error),
@@ -268,7 +272,12 @@ impl BindCommand {
 
         if !self.list_funcs_and_bindings && !self.list_funcs_and_bindings_reusable {
             for key_sequence in &self.key_sequences {
-                apply_readline_input(context.shell, bindings, key_sequence.trim())?;
+                match apply_readline_input(context.shell, bindings, key_sequence.trim()) {
+                    Err(BindError::UnknownVariable(name)) => {
+                        writeln!(context.stderr(), "readline: {name}: unknown variable name")?;
+                    }
+                    result => result?,
+                }
             }
         }
 
@@ -285,10 +294,32 @@ fn apply_readline_input(
         .strip_prefix("set")
         .filter(|rest| rest.starts_with(char::is_whitespace))
     {
-        let Some((name, value)) = setting.trim().split_once(char::is_whitespace) else {
-            return Err(BindError::InvalidSetting(setting.trim().to_owned()));
-        };
+        let setting = setting.trim();
+        let (name, value) = setting
+            .split_once(char::is_whitespace)
+            .unwrap_or((setting, ""));
         let value = value.trim();
+        if value.is_empty()
+            && matches!(
+                name,
+                "keymap"
+                    | "editing-mode"
+                    | "bell-style"
+                    | "comment-begin"
+                    | "emacs-mode-string"
+                    | "vi-cmd-mode-string"
+                    | "vi-ins-mode-string"
+                    | "active-region-start-color"
+                    | "active-region-end-color"
+                    | "history-size"
+                    | "completion-display-width"
+                    | "keyseq-timeout"
+                    | "completion-prefix-display-length"
+                    | "completion-query-items"
+            )
+        {
+            return Err(BindError::InvalidSetting(setting.to_owned()));
+        }
         let value = if matches!(
             name,
             "comment-begin"
@@ -319,15 +350,20 @@ fn apply_readline_input(
             shell.options_mut().vi_mode = vi;
             shell.options_mut().emacs_mode = !vi;
         } else if name == "mark-directories" {
-            let Some(value) = parse_onoff(value) else {
-                return Err(BindError::InvalidSetting(setting.trim().to_owned()));
-            };
             shell
                 .completion_config_mut()
                 .fallback_options
-                .mark_directories = value;
-        } else if !set_readline_variable(shell.readline_options_mut(), name, value) {
-            return Err(BindError::InvalidSetting(setting.trim().to_owned()));
+                .mark_directories = parse_onoff(value);
+        } else {
+            match set_readline_variable(shell.readline_options_mut(), name, value) {
+                SetVariableResult::Applied => {}
+                SetVariableResult::Invalid => {
+                    return Err(BindError::InvalidSetting(setting.to_owned()));
+                }
+                SetVariableResult::Unknown => {
+                    return Err(BindError::UnknownVariable(name.to_owned()));
+                }
+            }
         }
         if name == "history-size"
             && let Some(limit) = shell.readline_options().history_size
@@ -341,18 +377,22 @@ fn apply_readline_input(
     bind_key_sequence_to_readline_target(bindings, key, target)
 }
 
-fn parse_onoff(value: &str) -> Option<bool> {
-    if value.eq_ignore_ascii_case("on") || value == "1" {
-        Some(true)
-    } else if value.eq_ignore_ascii_case("off") || value == "0" {
-        Some(false)
-    } else {
-        None
-    }
+fn parse_onoff(value: &str) -> bool {
+    value.is_empty() || value.eq_ignore_ascii_case("on") || value == "1"
+}
+
+enum SetVariableResult {
+    Applied,
+    Invalid,
+    Unknown,
 }
 
 #[allow(clippy::too_many_lines, reason = "one match arm per inputrc variable")]
-fn set_readline_variable(options: &mut ReadlineOptions, name: &str, value: &str) -> bool {
+fn set_readline_variable(
+    options: &mut ReadlineOptions,
+    name: &str,
+    value: &str,
+) -> SetVariableResult {
     let target = match name {
         "bind-tty-special-chars" => &mut options.bind_tty_special_chars,
         "blink-matching-paren" => &mut options.blink_matching_paren,
@@ -365,23 +405,18 @@ fn set_readline_variable(options: &mut ReadlineOptions, name: &str, value: &str)
         "mark-modified-lines" => &mut options.mark_modified_lines,
         "revert-all-at-newline" => &mut options.revert_all_at_newline,
         "enable-active-region" => {
-            let Some(enabled) = parse_onoff(value) else {
-                return false;
-            };
-            options.enable_active_region = Some(enabled);
-            return true;
+            options.enable_active_region = Some(parse_onoff(value));
+            return SetVariableResult::Applied;
         }
         "prefer-visible-bell" => {
-            let Some(enabled) = parse_onoff(value) else {
-                return false;
-            };
+            let enabled = parse_onoff(value);
             options.prefer_visible_bell = enabled;
             options.bell_style = Some(if enabled {
                 brush_core::ReadlineBellStyle::Visible
             } else {
                 brush_core::ReadlineBellStyle::Audible
             });
-            return true;
+            return SetVariableResult::Applied;
         }
         "active-region-start-color" | "active-region-end-color" => {
             let target = if name == "active-region-start-color" {
@@ -390,7 +425,7 @@ fn set_readline_variable(options: &mut ReadlineOptions, name: &str, value: &str)
                 &mut options.active_region_end_color
             };
             *target = Some(value.to_owned());
-            return true;
+            return SetVariableResult::Applied;
         }
 
         "input-meta" | "meta-flag" => &mut options.input_meta,
@@ -414,11 +449,11 @@ fn set_readline_variable(options: &mut ReadlineOptions, name: &str, value: &str)
         "history-preserve-point" => &mut options.history_preserve_point,
         "show-mode-in-prompt" => &mut options.show_mode_in_prompt,
         "bell-style" => {
-            let Ok(style) = value.parse() else {
-                return false;
+            let Ok(style) = value.to_ascii_lowercase().parse() else {
+                return SetVariableResult::Invalid;
             };
             options.bell_style = Some(style);
-            return true;
+            return SetVariableResult::Applied;
         }
         "comment-begin" | "emacs-mode-string" | "vi-cmd-mode-string" | "vi-ins-mode-string" => {
             let target = match name {
@@ -428,11 +463,11 @@ fn set_readline_variable(options: &mut ReadlineOptions, name: &str, value: &str)
                 _ => &mut options.vi_ins_mode_string,
             };
             value.clone_into(target);
-            return true;
+            return SetVariableResult::Applied;
         }
         "history-size" | "completion-display-width" => {
             let Ok(value) = value.parse::<isize>() else {
-                return false;
+                return SetVariableResult::Invalid;
             };
             let target = if name == "history-size" {
                 &mut options.history_size
@@ -440,25 +475,19 @@ fn set_readline_variable(options: &mut ReadlineOptions, name: &str, value: &str)
                 &mut options.completion_display_width
             };
             *target = usize::try_from(value).ok();
-            return true;
+            return SetVariableResult::Applied;
         }
         "keyseq-timeout" => {
             options.keyseq_timeout = u64::from(readline_nonnegative_integer(value));
-            return true;
+            return SetVariableResult::Applied;
         }
         "enable-bracketed-paste" => {
-            let Some(value) = parse_onoff(value) else {
-                return false;
-            };
-            options.enable_bracketed_paste = Some(value);
-            return true;
+            options.enable_bracketed_paste = Some(parse_onoff(value));
+            return SetVariableResult::Applied;
         }
         "mark-symlinked-directories" => {
-            let Some(value) = parse_onoff(value) else {
-                return false;
-            };
-            options.mark_symlinked_directories = Some(value);
-            return true;
+            options.mark_symlinked_directories = Some(parse_onoff(value));
+            return SetVariableResult::Applied;
         }
         "completion-prefix-display-length" | "completion-query-items" => {
             let value = readline_nonnegative_integer(value) as usize;
@@ -467,15 +496,12 @@ fn set_readline_variable(options: &mut ReadlineOptions, name: &str, value: &str)
             } else {
                 options.completion_prefix_display_length = value;
             }
-            return true;
+            return SetVariableResult::Applied;
         }
-        _ => return false,
+        _ => return SetVariableResult::Unknown,
     };
-    let Some(value) = parse_onoff(value) else {
-        return false;
-    };
-    *target = value;
-    true
+    *target = parse_onoff(value);
+    SetVariableResult::Applied
 }
 
 // Readline accepts a decimal prefix in these settings and clamps negative values to zero.
