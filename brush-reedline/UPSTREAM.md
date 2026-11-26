@@ -45,7 +45,7 @@ The last three were reconciled against that tree and the existing fork.
 | `536194e` | Already present. The engine paints a request from the last dropped repaint handle, with ordered input still in place. |
 | `96ae188` | Already present. A soft-wrapped hint is clipped to the visible screen. |
 | `d850931` | Already present. External output can release the editor's polling requirement. |
-| `3ede01d` | Already present. README, contributor guide, and wordmark with Brush file hygiene. |
+| [Wordmark update](https://github.com/nushell/reedline/commit/3ede01df2dda2e69480b4ea9402a7c570c78010d) | Already present. README, contributor guide, and wordmark with Brush file hygiene. |
 | `58b32ba` | Already present. A completion that outlives its menu invalidates the prompt anchor. |
 | `ef07d39` | Already present. Prompt footer, example, and tests coexist with Brush's status-line callback. |
 | `f1d6069` | Already present in the manifest. `rusqlite` 0.43.0 and both SQLite feature paths are retained. |
