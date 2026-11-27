@@ -8,11 +8,13 @@ use std::{
 
 use crate::{
     error,
-    history::HistoryControl,
+    history::{History, HistoryControl, HistoryWriteMode},
     history_file::{
         OwnAppend, ReadPosition, complete_record_end, lock_history_file, tail_checksum,
+        trim_history_bytes, write_startup_trim,
     },
     openfiles, patterns,
+    sys::fs::{HistoryFileIdentity, history_file_metadata},
 };
 
 /// Joins the lines of a multi-line command the way bash's `cmdhist` does.
@@ -144,51 +146,138 @@ enum HistoryLimit {
     Limited(usize),
 }
 
-impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
-    pub(super) fn load_history(&self) -> Result<Option<crate::history::History>, error::Error> {
-        const MAX_FILE_SIZE_FOR_HISTORY_IMPORT: u64 = 1024 * 1024 * 1024; // 1 GiB
+/// The startup bytes and the metadata of the handle that supplied them.
+struct StartupHistorySnapshot {
+    bytes: Vec<u8>,
+    file: Option<(std::fs::Metadata, Option<HistoryFileIdentity>)>,
+}
 
-        let Some(history_path) = self.history_file_path() else {
-            return Ok(None);
-        };
+const MAX_FILE_SIZE_FOR_HISTORY_IMPORT: u64 = 1024 * 1024 * 1024; // 1 GiB
 
-        let mut options = std::fs::File::options();
-        options.read(true);
-
-        let mut history_file =
-            self.open_file(&options, history_path.clone(), &self.default_exec_params())?;
-
-        // Check on the file's size.
-        if let openfiles::OpenFile::File(file) = &mut history_file {
-            let file_metadata = file.metadata()?;
-            let file_size = file_metadata.len();
-
-            // If the file is empty, no reason to try reading it. Note that this will also
-            // end up excluding non-regular files that report a 0 file size but appear
-            // to have contents when read.
+impl StartupHistorySnapshot {
+    fn read(mut file: openfiles::OpenFile) -> Result<Option<Self>, error::Error> {
+        let mut bytes = Vec::new();
+        let file = if let openfiles::OpenFile::File(handle) = &file {
+            let (metadata, identity) = history_file_metadata(handle)?;
+            let file_size = metadata.len();
+            // Also skip non-regular files that report size zero despite having contents.
             if file_size == 0 {
                 return Ok(None);
             }
-
-            // Bail if the file is unrealistically large. For now we just refuse to import it.
             if file_size > MAX_FILE_SIZE_FOR_HISTORY_IMPORT {
                 return Err(error::ErrorKind::HistoryFileTooLargeToImport.into());
             }
+            // Keep appends after this size observation for the next incremental read.
+            file.take(file_size).read_to_end(&mut bytes)?;
+            Some((metadata, identity))
+        } else {
+            file.read_to_end(&mut bytes)?;
+            None
+        };
+        Ok(Some(Self { bytes, file }))
+    }
+
+    fn trim(
+        &mut self,
+        path: &Path,
+        limit: usize,
+        mode: HistoryWriteMode,
+    ) -> Result<(), error::Error> {
+        let Some((original, identity)) = &mut self.file else {
+            return Ok(());
+        };
+        let trimmed = trim_history_bytes(&self.bytes, limit);
+        if trimmed.len() == self.bytes.len() {
+            return Ok(());
         }
 
-        let mut history = crate::history::History::import(history_file)?;
+        // The portable lock covers cooperating writers. Leave a changed path or file for
+        // the next incremental read if a writer outside that lock has already modified it.
+        let (current, current_identity) = history_file_metadata(&std::fs::File::open(path)?)?;
+        if current_identity != *identity
+            || current.len() != self.bytes.len() as u64
+            || current.modified().ok() != original.modified().ok()
+        {
+            return Ok(());
+        }
+        *identity = write_startup_trim(path, &trimmed, mode)?;
+        self.bytes = trimmed;
+        Ok(())
+    }
+}
+
+impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
+    pub(super) fn load_startup_history(&mut self) -> Result<(), error::Error> {
+        let Some(path) = self.history_file_path() else {
+            return Ok(());
+        };
+
+        let mut file_limit = self.history_file_size_limit();
+        // Take the writer lock before the snapshot if startup may trim the file. A session
+        // that cannot lock the file can still import it and track future appends.
+        let _lock = if file_limit.is_some() && self.history_write_mode == HistoryWriteMode::Portable
+        {
+            if path.metadata().is_ok_and(|metadata| {
+                metadata.is_file()
+                    && (1..=MAX_FILE_SIZE_FOR_HISTORY_IMPORT).contains(&metadata.len())
+            }) {
+                match lock_history_file(&path) {
+                    Ok(lock) => Some(lock),
+                    Err(error) => {
+                        tracing::warn!("could not lock history file for startup trim: {error}");
+                        file_limit = None;
+                        None
+                    }
+                }
+            } else {
+                file_limit = None;
+                None
+            }
+        } else {
+            None
+        };
+
+        let file = self.open_file(
+            std::fs::File::options().read(true),
+            &path,
+            &self.default_exec_params(),
+        )?;
+        if let Some(snapshot) = StartupHistorySnapshot::read(file)? {
+            self.install_startup_history(path, snapshot, file_limit)?;
+        }
+        Ok(())
+    }
+
+    fn install_startup_history(
+        &mut self,
+        path: PathBuf,
+        mut snapshot: StartupHistorySnapshot,
+        file_limit: Option<usize>,
+    ) -> Result<(), error::Error> {
+        let original_len = snapshot.bytes.len();
+        let complete_end = complete_record_end(&snapshot.bytes);
+        let mut history = History::import(&snapshot.bytes[..complete_end])?;
         if let Some(limit) = self.history_size_limit() {
             history.retain_last(limit);
         }
         history.set_write_mode(self.history_write_mode);
-        if let Some(limit) = self.history_file_size_limit()
-            && let Err(error) = history.truncate_file(&history_path, limit)
+        if let Some(limit) = file_limit
+            && let Err(error) = snapshot.trim(&path, limit, self.history_write_mode)
         {
-            // Reading succeeded; a read-only directory or unavailable lock must not discard
-            // the in-memory history. The file is left untouched for a later writable session.
             tracing::warn!("could not trim history file at startup: {error}");
         }
-        Ok(Some(history))
+
+        // Trimming retains a suffix. Translate the consumed boundary to that suffix, including
+        // when the rewrite kept only an unfinished record or left the file empty.
+        let end = complete_end.saturating_sub(original_len - snapshot.bytes.len());
+        self.history_file_state.read_position = snapshot.file.map(|(_, identity)| ReadPosition {
+            path,
+            offset: end as u64,
+            identity,
+            checksum: tail_checksum(&snapshot.bytes[..end]),
+        });
+        self.history = Some(history);
+        Ok(())
     }
 
     /// Returns the number of entries the in-memory history may hold, or `None` for no limit.
@@ -302,7 +391,7 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
     /// beginning.
     #[expect(
         clippy::cast_possible_truncation,
-        reason = "history offsets are file lengths, which fit in usize on supported targets"
+        reason = "only the checksum prefix length, at most 256 bytes, is converted to usize"
     )]
     #[allow(
         clippy::too_many_lines,
@@ -321,7 +410,7 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
         };
 
         let mut file = std::fs::File::open(&path)?;
-        let (metadata, file_id) = crate::sys::fs::history_file_metadata(&file)?;
+        let (metadata, file_id) = history_file_metadata(&file)?;
         let length = metadata.len();
 
         let stored = if new_only {
@@ -339,12 +428,14 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
         file.seek(SeekFrom::Start(read_from))?;
         file.read_to_end(&mut bytes)?;
 
-        let mut offset = candidate.map_or(0, |position| position as usize);
-        let mut prefix_len = offset - read_from as usize;
+        let mut offset = candidate.unwrap_or(0);
+        let mut prefix_len = (offset - read_from) as usize;
         if offset > 0
-            && stored
-                .as_ref()
-                .is_some_and(|position| tail_checksum(&bytes[..prefix_len]) != position.checksum)
+            && stored.as_ref().is_some_and(|position| {
+                bytes
+                    .get(..prefix_len)
+                    .is_none_or(|prefix| tail_checksum(prefix) != position.checksum)
+            })
         {
             offset = 0;
             prefix_len = 0;
@@ -358,7 +449,7 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
         if complete_end == 0 {
             self.history_file_state.read_position = Some(ReadPosition {
                 path,
-                offset: offset as u64,
+                offset,
                 identity: file_id,
                 checksum: tail_checksum(&bytes[..prefix_len]),
             });
@@ -433,37 +524,12 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
         self.history_file_state.own_appends = own_appends;
         self.history_file_state.read_position = Some(ReadPosition {
             path,
-            offset: (offset + complete_end) as u64,
+            offset: offset + complete_end as u64,
             identity: file_id,
             checksum: tail_checksum(&bytes[..prefix_len + complete_end]),
         });
 
         Ok(())
-    }
-
-    /// Remembers where a startup import stopped, so a first `history -n` does not import the
-    /// entries the shell already loaded.
-    pub(super) fn remember_history_file_position(&mut self) {
-        let Some(path) = self.history_file_path() else {
-            return;
-        };
-        let Ok(mut file) = std::fs::File::open(&path) else {
-            return;
-        };
-        let Ok((_metadata, file_id)) = crate::sys::fs::history_file_metadata(&file) else {
-            return;
-        };
-        let mut bytes = Vec::new();
-        if file.read_to_end(&mut bytes).is_err() {
-            return;
-        }
-        let complete_end = complete_record_end(&bytes);
-        self.history_file_state.read_position = Some(ReadPosition {
-            path,
-            offset: complete_end as u64,
-            identity: file_id,
-            checksum: tail_checksum(&bytes[..complete_end]),
-        });
     }
 
     /// Records that the complete history file was just written through `offset`.
@@ -738,7 +804,7 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
 )]
 mod tests {
     use super::*;
-    use crate::{history::History, variables::ShellVariable};
+    use crate::{ProfileLoadBehavior, RcLoadBehavior, variables::ShellVariable};
     use std::io::Write as _;
 
     #[test]
@@ -767,20 +833,247 @@ mod tests {
         );
     }
 
+    async fn startup_shell(path: &Path) -> Result<crate::Shell, error::Error> {
+        crate::Shell::builder()
+            .interactive(true)
+            .do_not_inherit_env(true)
+            .skip_well_known_vars(true)
+            .profile(ProfileLoadBehavior::Skip)
+            .rc(RcLoadBehavior::Skip)
+            .var(
+                "HISTFILE",
+                ShellVariable::new(path.to_string_lossy().into_owned()),
+            )
+            .build()
+            .await
+    }
+
+    fn history_lines(shell: &crate::Shell) -> Vec<&str> {
+        shell
+            .history()
+            .expect("history")
+            .iter()
+            .map(|item| item.command_line.as_str())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn startup_cursor_tracks_appends_on_both_sides_of_the_snapshot()
+    -> Result<(), error::Error> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("history");
+        std::fs::write(&path, b"original\n")?;
+        let mut shell = startup_shell(&path).await?;
+
+        let opened = std::fs::File::open(&path)?;
+        let mut writer = std::fs::OpenOptions::new().append(true).open(&path)?;
+        writer.write_all(b"before-snapshot\n")?;
+        let snapshot = StartupHistorySnapshot::read(opened.into())?.expect("snapshot");
+        writer.write_all(b"after-snapshot\n")?;
+        // The startup trim must also leave this uncoordinated append in place.
+        shell.install_startup_history(path, snapshot, Some(1))?;
+        assert_eq!(history_lines(&shell), ["original", "before-snapshot"]);
+        writer.write_all(b"after-import\n")?;
+
+        shell.read_new_history()?;
+        shell.read_new_history()?;
+        assert_eq!(
+            history_lines(&shell),
+            [
+                "original",
+                "before-snapshot",
+                "after-snapshot",
+                "after-import"
+            ]
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn startup_uses_the_identity_of_the_handle_it_reads() -> Result<(), error::Error> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("history");
+        std::fs::write(&path, b"old-one\nold-two\n")?;
+        let mut shell = startup_shell(&path).await?;
+
+        let opened = std::fs::File::open(&path)?;
+        let (_, identity) = history_file_metadata(&opened)?;
+        let replacement = dir.path().join("replacement");
+        std::fs::write(&replacement, b"rotated-one\nrotated-two\n")?;
+        std::fs::rename(&replacement, &path)?;
+        let snapshot = StartupHistorySnapshot::read(opened.into())?.expect("snapshot");
+        shell.install_startup_history(path.clone(), snapshot, Some(1))?;
+        let cursor = shell
+            .history_file_state
+            .read_position
+            .as_ref()
+            .expect("cursor");
+        assert_eq!(cursor.identity, identity);
+        assert_eq!(cursor.offset, 16);
+        assert_eq!(history_lines(&shell), ["old-one", "old-two"]);
+        assert_eq!(std::fs::read(&path)?, b"rotated-one\nrotated-two\n");
+
+        shell.read_new_history()?;
+        shell.read_new_history()?;
+        assert_eq!(
+            history_lines(&shell),
+            ["old-one", "old-two", "rotated-one", "rotated-two"]
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn startup_cursor_recovers_after_in_place_truncation() -> Result<(), error::Error> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("history");
+        std::fs::write(&path, b"long-before-truncation\n")?;
+        let mut shell = startup_shell(&path).await?;
+        let snapshot =
+            StartupHistorySnapshot::read(std::fs::File::open(&path)?.into())?.expect("snapshot");
+        std::fs::write(&path, b"short\n")?;
+        shell.install_startup_history(path.clone(), snapshot, None)?;
+
+        shell.read_new_history()?;
+        std::fs::write(&path, b"regrown-past-that-cursor\n")?;
+        shell.read_new_history()?;
+        shell.read_new_history()?;
+        assert_eq!(
+            history_lines(&shell),
+            [
+                "long-before-truncation",
+                "short",
+                "regrown-past-that-cursor"
+            ]
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn startup_trim_tracks_the_written_suffix_and_leaves_partial_records_pending()
+    -> Result<(), error::Error> {
+        for mode in [HistoryWriteMode::Portable, HistoryWriteMode::Bash] {
+            let dir = tempfile::tempdir()?;
+            let path = dir.path().join("history");
+            let retained = b"#1700000002\nkept\n";
+            let partial = b"#1700000003\nincomplete";
+            std::fs::write(
+                &path,
+                [&b"#1700000001\nremoved\n"[..], retained, partial].concat(),
+            )?;
+            let mut shell = startup_shell(&path).await?;
+            shell.set_env_global("HISTFILESIZE", ShellVariable::new("2"))?;
+            shell.set_history_write_mode(mode);
+            shell
+                .load_config(&ProfileLoadBehavior::Skip, &RcLoadBehavior::Skip)
+                .await?;
+
+            assert_eq!(history_lines(&shell), ["removed", "kept"]);
+            assert_eq!(std::fs::read(&path)?, [&retained[..], partial].concat());
+            let cursor = shell
+                .history_file_state
+                .read_position
+                .as_ref()
+                .expect("cursor");
+            let (_, identity) = history_file_metadata(&std::fs::File::open(&path)?)?;
+            assert_eq!(cursor.identity, identity);
+            assert_eq!(cursor.offset, retained.len() as u64);
+            shell.read_new_history()?;
+            assert_eq!(history_lines(&shell), ["removed", "kept"]);
+
+            std::fs::OpenOptions::new()
+                .append(true)
+                .open(&path)?
+                .write_all(b"-done\n")?;
+            shell.read_new_history()?;
+            shell.read_new_history()?;
+            assert_eq!(
+                history_lines(&shell),
+                ["removed", "kept", "incomplete-done"]
+            );
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn startup_consumes_invalid_complete_lines_but_leaves_partial_lines_pending()
+    -> Result<(), error::Error> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("history");
+        let complete = b"invalid-\xff\nvalid\n";
+        std::fs::write(&path, [&complete[..], b"partial"].concat())?;
+        let mut shell = startup_shell(&path).await?;
+        shell.load_startup_history()?;
+        assert_eq!(history_lines(&shell), ["valid"]);
+        let cursor = shell
+            .history_file_state
+            .read_position
+            .as_ref()
+            .expect("cursor");
+        assert_eq!(cursor.offset, complete.len() as u64);
+        assert_eq!(cursor.checksum, tail_checksum(complete));
+
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)?
+            .write_all(b"-done\n")?;
+        shell.read_new_history()?;
+        assert_eq!(history_lines(&shell), ["valid", "partial-done"]);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn startup_zero_file_limit_still_reads_the_first_append() -> Result<(), error::Error> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("history");
+        std::fs::write(&path, b"before-trim\n")?;
+        let mut shell = startup_shell(&path).await?;
+        shell.set_env_global("HISTFILESIZE", ShellVariable::new("0"))?;
+        shell.load_startup_history()?;
+
+        assert_eq!(history_lines(&shell), ["before-trim"]);
+        assert_eq!(std::fs::metadata(&path)?.len(), 0);
+        assert_eq!(
+            shell
+                .history_file_state
+                .read_position
+                .as_ref()
+                .expect("cursor")
+                .offset,
+            0
+        );
+
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)?
+            .write_all(b"after-trim\n")?;
+        shell.read_new_history()?;
+        assert_eq!(history_lines(&shell), ["before-trim", "after-trim"]);
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn startup_rejects_files_above_the_import_limit() -> Result<(), error::Error> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("history");
+        std::fs::File::create(&path)?.set_len(MAX_FILE_SIZE_FOR_HISTORY_IMPORT + 1)?;
+        let mut shell = startup_shell(&path).await?;
+        assert!(matches!(
+            shell.load_startup_history(),
+            Err(error) if matches!(error.kind(), error::ErrorKind::HistoryFileTooLargeToImport)
+        ));
+        assert!(shell.history_file_state.read_position.is_none());
+        Ok(())
+    }
+
     #[tokio::test]
     async fn share_reads_new_entries_after_an_atomic_rewrite() -> Result<(), error::Error> {
         let dir = tempfile::tempdir()?;
         let path = dir.path().join("history");
         std::fs::write(&path, "old-entry\n")?;
 
-        let loaded = History::import(std::fs::File::open(&path)?)?;
-        let mut shell = crate::Shell::builder().build().await?;
-        shell.set_env_global(
-            "HISTFILE",
-            ShellVariable::new(path.to_string_lossy().to_string()),
-        )?;
-        shell.history = Some(loaded);
-        shell.remember_history_file_position();
+        let mut shell = startup_shell(&path).await?;
+        shell.load_startup_history()?;
 
         // Simulate another session's normal exit: the whole file is moved into a new inode
         // while retaining the old prefix and adding one record.
@@ -913,14 +1206,8 @@ mod tests {
         let path = dir.path().join("history");
         std::fs::write(&path, "old-entry\n")?;
 
-        let loaded = History::import(std::fs::File::open(&path)?)?;
-        let mut shell = crate::Shell::builder().build().await?;
-        shell.set_env_global(
-            "HISTFILE",
-            ShellVariable::new(path.to_string_lossy().to_string()),
-        )?;
-        shell.history = Some(loaded);
-        shell.remember_history_file_position();
+        let mut shell = startup_shell(&path).await?;
+        shell.load_startup_history()?;
 
         shell
             .history_mut()
@@ -1002,17 +1289,26 @@ mod tests {
         std::fs::write(&path, ": one\n: two\n")?;
         std::fs::create_dir_all(crate::history_file::lock_path(&path))?;
 
-        let mut shell = crate::Shell::builder().build().await?;
-        shell.set_env_global(
-            "HISTFILE",
-            ShellVariable::new(path.to_string_lossy().to_string()),
-        )?;
+        let mut shell = startup_shell(&path).await?;
         shell.set_env_global("HISTSIZE", ShellVariable::new("1"))?;
         shell.set_env_global("HISTFILESIZE", ShellVariable::new("0"))?;
 
-        let history = shell.load_history()?.expect("loaded history");
-        assert_eq!(history.iter().count(), 1);
+        shell.load_startup_history()?;
+        assert_eq!(history_lines(&shell), [": two"]);
         assert_eq!(std::fs::read_to_string(&path)?, ": one\n: two\n");
+        let cursor = shell
+            .history_file_state
+            .read_position
+            .as_ref()
+            .expect("cursor");
+        assert_eq!(cursor.offset, 12);
+
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)?
+            .write_all(b": three\n")?;
+        shell.read_new_history()?;
+        assert_eq!(history_lines(&shell), [": three"]);
         Ok(())
     }
 
@@ -1074,14 +1370,8 @@ mod tests {
         std::fs::write(&path, format!("OLD-ENTRY\n{filler}\n"))?;
         let old_len = std::fs::metadata(&path)?.len();
 
-        let loaded = History::import(std::fs::File::open(&path)?)?;
-        let mut shell = crate::Shell::builder().build().await?;
-        shell.set_env_global(
-            "HISTFILE",
-            ShellVariable::new(path.to_string_lossy().to_string()),
-        )?;
-        shell.history = Some(loaded);
-        shell.remember_history_file_position();
+        let mut shell = startup_shell(&path).await?;
+        shell.load_startup_history()?;
 
         let replacement = dir.path().join("replacement");
         std::fs::write(&replacement, format!("NEW-ENTRY\n{filler}\n"))?;
@@ -1106,14 +1396,8 @@ mod tests {
         let path = dir.path().join("history");
         std::fs::write(&path, "one\ntwo\nthree\n")?;
 
-        let loaded = History::import(std::fs::File::open(&path)?)?;
-        let mut shell = crate::Shell::builder().build().await?;
-        shell.set_env_global(
-            "HISTFILE",
-            ShellVariable::new(path.to_string_lossy().to_string()),
-        )?;
-        shell.history = Some(loaded);
-        shell.remember_history_file_position();
+        let mut shell = startup_shell(&path).await?;
+        shell.load_startup_history()?;
 
         let replacement = dir.path().join("replacement");
         std::fs::write(&replacement, "two\nthree\nnew\n")?;
@@ -1151,14 +1435,8 @@ mod tests {
         let path = dir.path().join("history");
         std::fs::write(&path, "old-one\nold-two\n")?;
 
-        let loaded = History::import(std::fs::File::open(&path)?)?;
-        let mut shell = crate::Shell::builder().build().await?;
-        shell.set_env_global(
-            "HISTFILE",
-            ShellVariable::new(path.to_string_lossy().to_string()),
-        )?;
-        shell.history = Some(loaded);
-        shell.remember_history_file_position();
+        let mut shell = startup_shell(&path).await?;
+        shell.load_startup_history()?;
 
         let replacement = dir.path().join("replacement");
         std::fs::write(&replacement, "rotated-one\nrotated-two\n")?;

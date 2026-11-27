@@ -67,10 +67,8 @@ impl<SE: extensions::ShellExtensions> Shell<SE> {
                 .history
                 .as_ref()
                 .is_none_or(crate::history::History::is_empty)
-            && let Ok(Some(history)) = self.load_history()
         {
-            self.history = Some(history);
-            self.remember_history_file_position();
+            let _ = self.load_startup_history();
         }
 
         Ok(())

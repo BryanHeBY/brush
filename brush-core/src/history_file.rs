@@ -182,6 +182,10 @@ pub(crate) fn replace_contents(
 
 /// Writes `contents` to the target in place, creating a new file privately.
 pub(crate) fn write_in_place(path: &Path, contents: &[u8]) -> Result<(), error::Error> {
+    write_in_place_file(path, contents).map(drop)
+}
+
+fn write_in_place_file(path: &Path, contents: &[u8]) -> Result<std::fs::File, error::Error> {
     let mut file = match crate::sys::fs::create_new_private_file(path) {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
@@ -194,7 +198,25 @@ pub(crate) fn write_in_place(path: &Path, contents: &[u8]) -> Result<(), error::
     };
     file.write_all(contents)?;
     file.flush()?;
-    Ok(())
+    Ok(file)
+}
+
+/// Rewrites a startup snapshot and identifies the exact file written. The caller handles locking.
+pub(crate) fn write_startup_trim(
+    path: &Path,
+    contents: &[u8],
+    mode: crate::history::HistoryWriteMode,
+) -> Result<Option<crate::sys::fs::HistoryFileIdentity>, error::Error> {
+    let identity = |file: &std::fs::File| {
+        crate::sys::fs::history_file_metadata(file)
+            .ok()
+            .and_then(|(_, identity)| identity)
+    };
+    if mode == crate::history::HistoryWriteMode::Portable {
+        atomic_write_with(path, contents, identity)
+    } else {
+        write_in_place_file(path, contents).map(|file| identity(&file))
+    }
 }
 
 /// Locks the history file used at `path`.
@@ -266,6 +288,14 @@ pub(crate) fn open_lock_file(path: &Path) -> Result<std::fs::File, error::Error>
 /// Writes `contents` to an exclusively-created temporary file next to `target`, then renames
 /// it into place. A symlinked target is resolved; existing permissions are preserved.
 pub(crate) fn atomic_write(path: &Path, contents: &[u8]) -> Result<(), error::Error> {
+    atomic_write_with(path, contents, |_| ())
+}
+
+fn atomic_write_with<T>(
+    path: &Path,
+    contents: &[u8],
+    written: impl FnOnce(&std::fs::File) -> T,
+) -> Result<T, error::Error> {
     let target = match std::fs::symlink_metadata(path) {
         Ok(metadata) if metadata.file_type().is_symlink() => std::fs::canonicalize(path)?,
         _ => path.to_path_buf(),
@@ -304,7 +334,7 @@ pub(crate) fn atomic_write(path: &Path, contents: &[u8]) -> Result<(), error::Er
         .into());
     };
 
-    let result = (|| -> Result<(), error::Error> {
+    let result = (|| -> Result<T, error::Error> {
         crate::sys::fs::prepare_history_replacement(&file, &target, target_metadata.is_some())?;
         file.write_all(contents)?;
         if let Some(permissions) = permissions {
@@ -312,9 +342,10 @@ pub(crate) fn atomic_write(path: &Path, contents: &[u8]) -> Result<(), error::Er
         }
         crate::sys::fs::preserve_history_group(&file, target_metadata.as_ref())?;
         file.sync_all()?;
+        let written = written(&file);
         drop(file);
         crate::sys::fs::replace_file(&temp_path, &target)?;
-        Ok(())
+        Ok(written)
     })();
     if result.is_err() {
         let _ = std::fs::remove_file(&temp_path);
