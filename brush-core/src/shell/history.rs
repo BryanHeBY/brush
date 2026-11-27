@@ -155,7 +155,14 @@ struct StartupHistorySnapshot {
 const MAX_FILE_SIZE_FOR_HISTORY_IMPORT: u64 = 1024 * 1024 * 1024; // 1 GiB
 
 impl StartupHistorySnapshot {
-    fn read(mut file: openfiles::OpenFile) -> Result<Option<Self>, error::Error> {
+    fn read(file: openfiles::OpenFile) -> Result<Option<Self>, error::Error> {
+        Self::read_with_limit(file, MAX_FILE_SIZE_FOR_HISTORY_IMPORT)
+    }
+
+    fn read_with_limit(
+        mut file: openfiles::OpenFile,
+        limit: u64,
+    ) -> Result<Option<Self>, error::Error> {
         let mut bytes = Vec::new();
         let file = if let openfiles::OpenFile::File(handle) = &file {
             let (metadata, identity) = history_file_metadata(handle)?;
@@ -164,7 +171,7 @@ impl StartupHistorySnapshot {
             if file_size == 0 {
                 return Ok(None);
             }
-            if file_size > MAX_FILE_SIZE_FOR_HISTORY_IMPORT {
+            if file_size > limit {
                 return Err(error::ErrorKind::HistoryFileTooLargeToImport.into());
             }
             // Keep appends after this size observation for the next incremental read.
@@ -1051,18 +1058,21 @@ mod tests {
         Ok(())
     }
 
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn startup_rejects_files_above_the_import_limit() -> Result<(), error::Error> {
+    #[test]
+    fn startup_rejects_files_above_the_import_limit() -> Result<(), error::Error> {
         let dir = tempfile::tempdir()?;
         let path = dir.path().join("history");
-        std::fs::File::create(&path)?.set_len(MAX_FILE_SIZE_FOR_HISTORY_IMPORT + 1)?;
-        let mut shell = startup_shell(&path).await?;
+        let source = b"command\n";
+        std::fs::write(&path, source)?;
+        let opened = || std::fs::File::open(&path).map(Into::into);
+        let limit = source.len() as u64;
         assert!(matches!(
-            shell.load_startup_history(),
+            StartupHistorySnapshot::read_with_limit(opened()?, limit - 1),
             Err(error) if matches!(error.kind(), error::ErrorKind::HistoryFileTooLargeToImport)
         ));
-        assert!(shell.history_file_state.read_position.is_none());
+        let snapshot =
+            StartupHistorySnapshot::read_with_limit(opened()?, limit)?.expect("snapshot");
+        assert_eq!(snapshot.bytes, source);
         Ok(())
     }
 
