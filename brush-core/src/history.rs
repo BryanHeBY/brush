@@ -27,14 +27,103 @@ pub enum HistoryWriteMode {
     Bash,
 }
 
+/// Persistent storage with a logical front. Cloning a history shares the vector's nodes.
+#[derive(Clone, Default)]
+struct HistoryItems {
+    entries: rpds::VectorSync<Item>,
+    head: usize,
+}
+
+impl HistoryItems {
+    fn len(&self) -> usize {
+        self.entries.len() - self.head
+    }
+
+    fn is_empty(&self) -> bool {
+        self.entries.len() == self.head
+    }
+
+    fn get(&self, index: usize) -> Option<&Item> {
+        self.entries.get(self.head.checked_add(index)?)
+    }
+
+    fn get_mut(&mut self, index: usize) -> Option<&mut Item> {
+        self.entries.get_mut(self.head.checked_add(index)?)
+    }
+
+    fn set_mut(&mut self, index: usize, item: Item) {
+        self.entries.set_mut(self.head + index, item);
+    }
+
+    fn last(&self) -> Option<&Item> {
+        self.entries.last()
+    }
+
+    fn iter(&self) -> impl Iterator<Item = &Item> {
+        self.entries.iter().skip(self.head)
+    }
+
+    fn iter_from(&self, start: usize) -> impl Iterator<Item = &Item> {
+        // Start at the requested position without walking the prefix. Full scans of a
+        // compact vector can use the vector's tree iterator.
+        if start == 0 && self.head == 0 {
+            itertools::Either::Left(self.iter())
+        } else {
+            itertools::Either::Right(
+                (start..self.len()).map(move |index| &self.entries[self.head + index]),
+            )
+        }
+    }
+
+    fn push_back_mut(&mut self, item: Item) {
+        self.entries.push_back_mut(item);
+    }
+
+    fn replace_suffix(&mut self, start: usize, suffix: Vec<Item>) {
+        if start == 0 {
+            *self = Self::default();
+        } else {
+            for _ in start..self.len() {
+                self.entries.drop_last_mut();
+            }
+        }
+        self.entries.extend(suffix);
+        self.compact_if_needed();
+    }
+
+    fn discard_prefix(&mut self, removed: usize) {
+        if removed == self.len() {
+            *self = Self::default();
+        } else {
+            self.head += removed;
+            self.compact_if_needed();
+        }
+    }
+
+    fn compact_if_needed(&mut self) {
+        // Let short histories accumulate up to 31 expired entries. At larger sizes,
+        // rebuild only after at least as many entries have expired as are still live.
+        if self.head >= self.len().max(32) {
+            self.entries = self.iter().cloned().collect();
+            self.head = 0;
+        }
+    }
+
+    #[cfg(feature = "serde")]
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_seq(self.iter())
+    }
+}
+
 /// Interface for querying and manipulating the shell's recorded history of commands.
-// TODO(history): support maximum item count
 #[derive(Clone, Default)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(from = "SerializedHistory"))]
 pub struct History {
     /// The items, oldest first. Their IDs only increase, so they're in ID order too, which
     /// finds an item by ID (by binary search) without a separate map from IDs to items.
-    items: rpds::VectorSync<Item>,
+    #[cfg_attr(feature = "serde", serde(serialize_with = "HistoryItems::serialize"))]
+    items: HistoryItems,
     next_id: ItemId,
     /// Index of the oldest unsaved item, if any. Kept so appending a command's item costs the
     /// unsaved tail rather than a scan of the whole history.
@@ -50,6 +139,38 @@ pub struct History {
     /// File write policy; not serialized because it is session configuration.
     #[cfg_attr(feature = "serde", serde(skip))]
     write_mode: HistoryWriteMode,
+}
+
+/// The on-wire history contains only live entries and uses their zero-based positions.
+#[cfg(feature = "serde")]
+#[derive(serde::Deserialize)]
+#[serde(rename = "History")]
+struct SerializedHistory {
+    items: rpds::VectorSync<Item>,
+    next_id: ItemId,
+    #[serde(default)]
+    first_dirty: Option<usize>,
+    #[serde(default)]
+    base: usize,
+}
+
+#[cfg(feature = "serde")]
+impl From<SerializedHistory> for History {
+    fn from(history: SerializedHistory) -> Self {
+        let first_dirty = history
+            .first_dirty
+            .or_else(|| history.items.iter().position(|item| item.dirty));
+        Self {
+            items: HistoryItems {
+                entries: history.items,
+                head: 0,
+            },
+            next_id: history.next_id,
+            first_dirty,
+            base: history.base,
+            ..Self::default()
+        }
+    }
 }
 
 impl History {
@@ -187,12 +308,7 @@ impl History {
         let after: Vec<Item> = (n + 1..len)
             .filter_map(|i| self.items.get(i).cloned())
             .collect();
-        for _ in n..len {
-            self.items.drop_last_mut();
-        }
-        for item in after {
-            self.items.push_back_mut(item);
-        }
+        self.items.replace_suffix(n, after);
         self.first_dirty = self.items.iter().position(|item| item.dirty);
 
         true
@@ -212,12 +328,7 @@ impl History {
             .filter(|item| keep(item))
             .cloned()
             .collect();
-        for _ in first_removed..self.items.len() {
-            self.items.drop_last_mut();
-        }
-        for item in kept {
-            self.items.push_back_mut(item);
-        }
+        self.items.replace_suffix(first_removed, kept);
         self.first_dirty = self.items.iter().position(|item| item.dirty);
     }
 
@@ -274,15 +385,16 @@ impl History {
     /// Discards the oldest entries until at most `limit` remain.
     pub fn retain_last(&mut self, limit: usize) {
         let removed = self.count().saturating_sub(limit);
-        let mut remove = removed;
-        if remove != 0 {
-            self.retain(|_| {
-                let keep = remove == 0;
-                remove = remove.saturating_sub(1);
-                keep
-            });
-            self.base += removed;
+        if removed == 0 {
+            return;
         }
+        self.items.discard_prefix(removed);
+        self.first_dirty = self.first_dirty.and_then(|first| {
+            first
+                .checked_sub(removed)
+                .or_else(|| self.items.iter_from(0).position(|item| item.dirty))
+        });
+        self.base += removed;
     }
 
     /// Adds a new history item. Returns the unique identifier of the newly added item.
@@ -322,7 +434,7 @@ impl History {
 
     /// Clears all history items.
     pub fn clear(&mut self) -> Result<(), error::Error> {
-        self.items = rpds::VectorSync::new_sync();
+        self.items = HistoryItems::default();
         self.first_dirty = None;
         self.base = 0;
         Ok(())
@@ -344,14 +456,6 @@ impl History {
         self.write_mode = mode;
     }
 
-    /// Returns the first dirty index, repairing it if an older serialized state omitted it.
-    fn ensure_dirty_index(&mut self) -> Option<usize> {
-        if self.first_dirty.is_none() {
-            self.first_dirty = self.items.iter().position(|item| item.dirty);
-        }
-        self.first_dirty
-    }
-
     /// Appends unsaved items to `path` without taking the history-file lock. The caller must
     /// hold it, so the append and any accompanying reads form one transaction.
     pub(crate) fn append_unsaved(
@@ -359,12 +463,12 @@ impl History {
         history_file_path: impl AsRef<Path>,
         write_timestamps: bool,
     ) -> Result<(), error::Error> {
-        let Some(start) = self.ensure_dirty_index() else {
+        let Some(start) = self.first_dirty else {
             return Ok(());
         };
         let mut file = open_append_file(history_file_path.as_ref())?;
         let mut written = Vec::new();
-        for (index, item) in self.items.iter().enumerate().skip(start) {
+        for (index, item) in self.items.iter_from(start).enumerate() {
             if !item.dirty {
                 continue;
             }
@@ -372,7 +476,7 @@ impl History {
                 writeln!(file, "#{}", timestamp.as_unix_seconds())?;
             }
             writeln!(file, "{}", item.command_line)?;
-            written.push(index);
+            written.push(start + index);
         }
         file.flush()?;
         for index in written {
@@ -403,9 +507,7 @@ impl History {
         use std::fmt::Write as _;
 
         let path = history_file_path.as_ref();
-        let first_dirty = unsaved_items_only
-            .then(|| self.ensure_dirty_index())
-            .flatten();
+        let first_dirty = self.first_dirty.filter(|_| unsaved_items_only);
         if unsaved_items_only && first_dirty.is_none() {
             return Ok(());
         }
@@ -413,11 +515,7 @@ impl History {
 
         if !append {
             let mut content = String::new();
-            for item in self
-                .items
-                .iter()
-                .skip(if unsaved_items_only { start } else { 0 })
-            {
+            for item in self.items.iter_from(start) {
                 if unsaved_items_only && !item.dirty {
                     continue;
                 }
@@ -435,7 +533,7 @@ impl History {
             .then(|| lock_history_file(path))
             .transpose()?;
         let mut file = std::io::BufWriter::new(open_append_file(path)?);
-        for item in self.items.iter().skip(start) {
+        for item in self.items.iter_from(start) {
             if unsaved_items_only && !item.dirty {
                 continue;
             }
@@ -482,9 +580,7 @@ impl History {
             return Ok(());
         }
 
-        let first_dirty = unsaved_items_only
-            .then(|| self.ensure_dirty_index())
-            .flatten();
+        let first_dirty = self.first_dirty.filter(|_| unsaved_items_only);
         if append && unsaved_items_only && first_dirty.is_none() && max_items.is_none() {
             return Ok(());
         }
@@ -511,11 +607,7 @@ impl History {
         };
         let start = first_dirty.unwrap_or(0);
         let mut new_content = String::new();
-        for item in self
-            .items
-            .iter()
-            .skip(if unsaved_items_only { start } else { 0 })
-        {
+        for item in self.items.iter_from(start) {
             if unsaved_items_only && !item.dirty {
                 continue;
             }
@@ -1238,31 +1330,60 @@ mod tests {
             .ok_or_else(|| std::io::Error::other("history serializes as an object"))?
             .remove("first_dirty");
         let mut restored: History = serde_json::from_value(value).map_err(std::io::Error::other)?;
-        assert!(restored.first_dirty.is_none());
-        assert!(restored.items.iter().any(|item| item.dirty));
+        restored.add(Item::new("new-after-restore"))?;
 
         let dir = tempfile::tempdir()?;
         let path = dir.path().join("history");
         restored.save_with_limit(&path, true, true, false, None)?;
-        assert_eq!(std::fs::read_to_string(&path)?, "from-old-state\n");
-
-        // Saving again must not duplicate the recovered item, and a new item must be added.
-        restored.save_with_limit(&path, true, true, false, None)?;
-        assert_eq!(std::fs::read_to_string(&path)?, "from-old-state\n");
-        restored.add(Item::new("new-after-restore"))?;
-        restored.save_with_limit(&path, true, true, false, None)?;
-        let contents = std::fs::read_to_string(&path)?;
         assert_eq!(
-            contents.matches("from-old-state").count(),
-            1,
-            "{contents:?}"
-        );
-        assert_eq!(
-            contents.matches("new-after-restore").count(),
-            1,
-            "{contents:?}"
+            std::fs::read_to_string(&path)?,
+            "from-old-state\nnew-after-restore\n"
         );
 
+        // Saving again must not duplicate either item.
+        restored.save_with_limit(&path, true, true, false, None)?;
+        assert_eq!(
+            std::fs::read_to_string(&path)?,
+            "from-old-state\nnew-after-restore\n"
+        );
+
+        Ok(())
+    }
+
+    #[cfg(feature = "serde")]
+    #[test]
+    fn serialized_history_contains_only_live_items() -> Result<(), error::Error> {
+        let mut history = History::default();
+        for (command_line, dirty) in [("expired", true), ("saved", false), ("pending", true)] {
+            history.add(Item {
+                command_line: command_line.into(),
+                dirty,
+                ..Item::default()
+            })?;
+        }
+        history.retain_last(2);
+        assert_eq!(history.items.head, 1);
+        let encoded = serde_json::to_value(&history).map_err(std::io::Error::other)?;
+        assert_eq!(
+            encoded,
+            serde_json::json!({
+                "items": [
+                    {"id": 1, "command_line": "saved", "timestamp": null, "dirty": false},
+                    {"id": 2, "command_line": "pending", "timestamp": null, "dirty": true}
+                ],
+                "next_id": 3,
+                "first_dirty": 1,
+                "base": 1
+            })
+        );
+        let mut decoded: History =
+            serde_json::from_value(encoded).map_err(std::io::Error::other)?;
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("history");
+        decoded.append_unsaved(&path, false)?;
+        assert_eq!(std::fs::read_to_string(path)?, "pending\n");
+        assert_eq!(decoded.base(), 1);
+        assert_eq!(decoded.add(Item::new("next"))?, 3);
         Ok(())
     }
 
@@ -1617,6 +1738,102 @@ mod tests {
         history.retain(|_| false);
         assert!(history.is_empty());
 
+        Ok(())
+    }
+
+    #[test]
+    fn prefix_eviction_keeps_positions_ids_and_snapshots() -> Result<(), error::Error> {
+        let mut history = history(&["first", "second", "third"])?;
+        history.retain_last(2);
+        let snapshot = history.clone();
+        assert_eq!(snapshot.items.head, 1);
+
+        for (id, base) in (3..68).zip(2..67) {
+            assert_eq!(history.add(Item::new(format!("command {id}")))?, id);
+            history.retain_last(2);
+            assert_eq!(history.count(), 2);
+            assert!(history.items.entries.len() <= 33);
+            assert_eq!(history.base(), base);
+            assert_eq!(history.get(0).map(|item| item.id), Some(id - 1));
+            assert_eq!(history.last().map(|item| item.id), Some(id));
+        }
+
+        assert_eq!(command_lines(snapshot.iter()), ["second", "third"]);
+        assert_eq!(snapshot.base(), 1);
+        assert!(history.get_by_id(65)?.is_none());
+        assert!(history.get(usize::MAX).is_none());
+        assert_eq!(
+            history
+                .search(Query {
+                    direction: Direction::Backward,
+                    not_at_or_before_id: Some(65),
+                    ..Query::default()
+                })?
+                .map(|item| item.id)
+                .collect::<Vec<_>>(),
+            [67, 66]
+        );
+
+        history.update_by_id(66, Item::default())?;
+        assert_eq!(history.first_dirty, Some(1));
+        history.retain(|item| item.id == 66);
+        assert_eq!(history.first_dirty, None);
+        assert!(history.remove_nth_item(0));
+        assert!(history.last().is_none());
+        assert_eq!(history.base(), 66);
+
+        let mut snapshot = snapshot;
+        snapshot.retain_last(0);
+        assert!(snapshot.is_empty());
+        assert_eq!(snapshot.base(), 3);
+        snapshot.clear()?;
+        assert_eq!(snapshot.base(), 0);
+        assert_eq!(snapshot.add(Item::new("after clear"))?, 3);
+        Ok(())
+    }
+
+    #[test]
+    fn prefix_eviction_preserves_append_retry_and_merge() -> Result<(), error::Error> {
+        let mut history = History::import(b"expired duplicate\n".as_slice())?;
+        history.add(Item::new("protected"))?;
+        history.append_from(b"visible clean\n".as_slice())?;
+        history.retain_last(2);
+        assert_eq!(history.items.head, 1);
+
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("absent-directory").join("history");
+        assert!(history.append_unsaved(&path, false).is_err());
+        history.mark_dirty_retry();
+
+        history.append_from_unique(b"expired duplicate\nvisible clean\nforeign\n".as_slice())?;
+        history.add(Item::new("newest"))?;
+        assert_eq!(
+            command_lines(history.iter()),
+            [
+                "protected",
+                "visible clean",
+                "expired duplicate",
+                "foreign",
+                "newest"
+            ]
+        );
+        history.retain_last_preserving_retry(4);
+        assert_eq!(history.items.head, 1);
+        assert_eq!(history.base(), 2);
+        assert_eq!(
+            command_lines(history.iter()),
+            ["protected", "expired duplicate", "foreign", "newest"]
+        );
+
+        let path = dir.path().join("history");
+        std::fs::write(&path, "on disk\n")?;
+        history.append_unsaved(&path, false)?;
+        history.append_unsaved(&path, false)?;
+        assert_eq!(
+            std::fs::read_to_string(path)?,
+            "on disk\nprotected\nnewest\n"
+        );
+        assert!(history.take_dirty().is_empty());
         Ok(())
     }
 
