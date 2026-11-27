@@ -35,10 +35,12 @@ pub use error::miette::PrettyError;
 
 #[cfg(feature = "winnow-parser")]
 pub use parser::winnow_str;
-pub use parser::{Parser, ParserBuilder, ParserImpl, ParserOptions, SourceInfo, parse_tokens};
+pub use parser::{
+    Parser, ParserBuilder, ParserImpl, ParserOptions, SourceInfo, multiline_layout, parse_tokens,
+};
 
 pub use source::{SourcePosition, SourcePositionOffset, SourceSpan};
 pub use tokenizer::{
-    Token, TokenLocation, TokenizerError, TokenizerOptions, tokenize_str,
-    tokenize_str_with_options, uncached_tokenize_str, unquote_str,
+    MultilineLayout, SourceLineBreak, Token, TokenLocation, TokenizerError, TokenizerOptions,
+    tokenize_str, tokenize_str_with_options, uncached_tokenize_str, unquote_str,
 };

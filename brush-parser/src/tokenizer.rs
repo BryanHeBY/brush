@@ -377,6 +377,51 @@ impl Default for TokenizerOptions {
     }
 }
 
+/// Source boundaries that can be considered for joining physical lines of shell input.
+#[derive(Debug, Default)]
+#[non_exhaustive]
+pub struct MultilineLayout {
+    /// Whether the tokenizer recognized a here-document redirection.
+    pub has_here_document: bool,
+    /// Joinable boundaries in source order, empty when a here-document is present.
+    pub line_breaks: Vec<SourceLineBreak>,
+    /// Byte offsets and replacement text, in source order, when the grammar can decide all
+    /// boundaries together. A caller retaining a terminal newline should skip its replacement.
+    pub newline_replacements: Option<Vec<(usize, &'static str)>>,
+}
+
+/// The lexical role of a joinable line break. Offsets are zero-based and point to the newline.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SourceLineBreak {
+    /// A newline token outside quotes, expansions, and comments. The grammar decides whether
+    /// it can be replaced and which separator is appropriate.
+    Newline(usize),
+    /// An unquoted backslash-newline continuation outside an expansion.
+    Continuation(usize),
+}
+
+pub(crate) fn tokenize_multiline(
+    input: &str,
+    options: &TokenizerOptions,
+) -> Result<(MultilineLayout, Vec<Token>), TokenizerError> {
+    let mut reader = input.as_bytes();
+    let mut layout = MultilineLayout::default();
+    let mut tokenizer = Tokenizer::new(&mut reader, options);
+    tokenizer.multiline_layout = Some(&mut layout);
+    let mut tokens = Vec::new();
+    loop {
+        let result = tokenizer.next_token()?;
+        tokens.extend(result.token);
+        if matches!(result.reason, TokenEndReason::EndOfInput) {
+            break;
+        }
+    }
+    if layout.has_here_document {
+        layout.line_breaks.clear();
+    }
+    Ok((layout, tokens))
+}
+
 /// Maximum depth of nested expansions (see [`NestedExpansion`]) the tokenizer will descend
 /// into, so deeply nested input can't overflow the stack while it's tokenized. Real scripts
 /// rarely nest more than a few levels: of ~2,900 surveyed (including bash-completion and
@@ -399,6 +444,7 @@ pub(crate) struct Tokenizer<'a, R: ?Sized + std::io::BufRead> {
     read_bodies_left_pending: bool,
     cross_state: CrossTokenParseState,
     options: TokenizerOptions,
+    multiline_layout: Option<&'a mut MultilineLayout>,
 }
 
 /// Chars read ahead of the tokenizer and put back.
@@ -780,6 +826,7 @@ impl<'a, R: ?Sized + std::io::BufRead> Tokenizer<'a, R> {
             char_reader: CharReader::new(reader.chars()),
             unread: None,
             read_bodies_left_pending: true,
+            multiline_layout: None,
             cross_state: CrossTokenParseState {
                 cursor: SourcePosition {
                     byte_offset: 0,
@@ -868,8 +915,13 @@ impl<'a, R: ?Sized + std::io::BufRead> Tokenizer<'a, R> {
     /// literally: right after an escaping backslash, within single quotes (including `$'...'`),
     /// in a comment, or in the body of a here-document whose tag is quoted. The tokenizer calls
     /// this wherever it reads input in which they're removed.
-    fn skip_line_continuations(&mut self) -> Result<(), TokenizerError> {
+    fn skip_line_continuations(&mut self, record_boundary: bool) -> Result<(), TokenizerError> {
         while self.peek_char()? == Some('\\') && self.peek_second_char()? == Some('\n') {
+            if record_boundary && let Some(layout) = self.multiline_layout.as_deref_mut() {
+                layout.line_breaks.push(SourceLineBreak::Continuation(
+                    self.cross_state.cursor.byte_offset + 1,
+                ));
+            }
             self.consume_char()?;
             self.consume_char()?;
         }
@@ -1043,7 +1095,9 @@ impl<'a, R: ?Sized + std::io::BufRead> Tokenizer<'a, R> {
         if c == '$' {
             // Consume the '$' so we can peek beyond.
             self.consume_char()?;
-            self.skip_line_continuations()?;
+            self.skip_line_continuations(
+                !in_double_quotes && self.cross_state.frame.expansion.is_none(),
+            )?;
 
             // Now peek beyond to see what we have.
             let char_after_dollar_sign = self.peek_char()?;
@@ -1057,7 +1111,7 @@ impl<'a, R: ?Sized + std::io::BufRead> Tokenizer<'a, R> {
 
                     // Check to see if this is possibly an arithmetic expression
                     // (i.e., one that starts with `$((`).
-                    self.skip_line_continuations()?;
+                    self.skip_line_continuations(false)?;
                     let expansion = if matches!(self.peek_char()?, Some('(')) {
                         // Consume the second '(' and add it to the token.
                         state.append_char(self.next_char()?.unwrap());
@@ -1126,7 +1180,7 @@ impl<'a, R: ?Sized + std::io::BufRead> Tokenizer<'a, R> {
                 // As in bash, line continuations are removed throughout (even within quotes in
                 // the command), except right after an escaping backslash.
                 if !escaping_enabled {
-                    self.skip_line_continuations()?;
+                    self.skip_line_continuations(false)?;
                 }
 
                 // Read (and consume) the next char.
@@ -1168,6 +1222,7 @@ impl<'a, R: ?Sized + std::io::BufRead> Tokenizer<'a, R> {
     pub fn next_token(&mut self) -> Result<TokenizeResult, TokenizerError> {
         let mut state = TokenParseState::new(&self.cross_state.cursor);
         let mut result: Option<TokenizeResult> = None;
+        let mut follows_comment = false;
 
         let expansion = self.cross_state.frame.expansion;
         let closing_char = expansion.map(NestedExpansion::closing_char);
@@ -1192,7 +1247,7 @@ impl<'a, R: ?Sized + std::io::BufRead> Tokenizer<'a, R> {
                 && self.peek_second_char()? == Some('\n')
                 && !self.backslash_is_literal(&state)
             {
-                self.skip_line_continuations()?;
+                self.skip_line_continuations(expansion.is_none() && state.unquoted())?;
                 if !state.started_token() {
                     state.start_position = self.cross_state.cursor.clone();
                 }
@@ -1360,12 +1415,13 @@ impl<'a, R: ?Sized + std::io::BufRead> Tokenizer<'a, R> {
                         } else if state.is_specific_operator(")") {
                             *parens -= 1;
                         }
-                    } else if state.is_specific_operator("<<") {
-                        self.cross_state.frame.here_state =
-                            HereState::NextTokenIsHereTag { remove_tabs: false };
-                    } else if state.is_specific_operator("<<-") {
-                        self.cross_state.frame.here_state =
-                            HereState::NextTokenIsHereTag { remove_tabs: true };
+                    } else if matches!(state.current_token(), "<<" | "<<-") {
+                        self.cross_state.frame.here_state = HereState::NextTokenIsHereTag {
+                            remove_tabs: state.current_token() == "<<-",
+                        };
+                        if let Some(layout) = self.multiline_layout.as_deref_mut() {
+                            layout.has_here_document = true;
+                        }
                     } else if state.is_specific_operator("(") && c == '(' {
                         // A `((...))` command starts with this `(`.
                         self.cross_state.frame.arithmetic_command_parens = 1;
@@ -1465,7 +1521,7 @@ impl<'a, R: ?Sized + std::io::BufRead> Tokenizer<'a, R> {
                     // Only single quotes (including `$'...'`) keep line continuations; double
                     // quotes don't.
                     if !matches!(quote, Some(('\'', _))) {
-                        self.skip_line_continuations()?;
+                        self.skip_line_continuations(false)?;
                     }
                     let Some(extglob_char) = self.peek_char()? else {
                         return Err(TokenizerError::UnterminatedExtendedGlob(
@@ -1525,6 +1581,15 @@ impl<'a, R: ?Sized + std::io::BufRead> Tokenizer<'a, R> {
                         &mut self.cross_state,
                     )?;
                 } else {
+                    if c == '\n'
+                        && expansion.is_none()
+                        && !follows_comment
+                        && let Some(layout) = self.multiline_layout.as_deref_mut()
+                    {
+                        layout.line_breaks.push(SourceLineBreak::Newline(
+                            self.cross_state.cursor.byte_offset,
+                        ));
+                    }
                     state.token_is_operator = true;
                     self.consume_char()?;
                     state.append_char(c);
@@ -1573,6 +1638,7 @@ impl<'a, R: ?Sized + std::io::BufRead> Tokenizer<'a, R> {
                     self.cross_state.frame.note_unquoted_char(c);
                 }
             } else if c == '#' {
+                follows_comment = true;
                 // Consume the '#'.
                 self.consume_char()?;
 
@@ -1826,6 +1892,49 @@ mod tests {
         let tokens = tokenize_str("")?;
         assert_eq!(tokens.len(), 0);
         Ok(())
+    }
+
+    #[test]
+    fn multiline_layout_reports_source_roles() {
+        let input = concat!(
+            "é#word \\\n",
+            "'${quoted}\ntext' ${value#prefix} # comment\n",
+            ": $(printf x # nested comment\n: y)\n",
+            ": value\\\\\n",
+            ": $\\\n{value}",
+        );
+        let (layout, _) = tokenize_multiline(input, &TokenizerOptions::default()).unwrap();
+        let newlines: Vec<_> = input
+            .match_indices('\n')
+            .map(|(offset, _)| offset)
+            .collect();
+        assert!(!layout.has_here_document);
+        assert_eq!(
+            layout.line_breaks,
+            [
+                SourceLineBreak::Continuation(newlines[0]),
+                SourceLineBreak::Newline(newlines[4]),
+                SourceLineBreak::Newline(newlines[5]),
+                SourceLineBreak::Continuation(newlines[6]),
+            ],
+        );
+    }
+
+    #[test]
+    fn multiline_layout_distinguishes_here_documents_from_other_operators() {
+        let options = TokenizerOptions::default();
+        for (input, has_here_document) in [
+            (": <<'END' <<<word\nbody\nEND", true),
+            (": \"$(cat <<-'END' # comment\n\tbody\n\tEND\n)\"", true),
+            (": '<<'\n: word", false),
+            ("((1 << 2))\n: word", false),
+            (": $((1 << 2))\n: word", false),
+            (": ${value:-<<}\n: word", false),
+            (": <<<word\n: word", false),
+        ] {
+            let (layout, _) = tokenize_multiline(input, &options).unwrap();
+            assert_eq!(layout.has_here_document, has_here_document, "{input:?}");
+        }
     }
 
     #[test]

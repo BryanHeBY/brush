@@ -787,6 +787,186 @@ cases:
       HIST_EOF
       history
 
+  - name: "cmdhist joins a block with an arithmetic shift command"
+    args: ["-o", "history"]
+    home_dir: "."
+    env:
+      HISTFILE: "history-file.txt"
+    stdin: |
+      if (( 1 << 2 )); then
+        echo shift-command
+      fi
+      history 2
+      unset HISTFILE
+
+  - name: "cmdhist joins a block with an arithmetic shift expansion"
+    args: ["-o", "history"]
+    home_dir: "."
+    env:
+      HISTFILE: "history-file.txt"
+    stdin: |
+      { printf '%s\n' "$((1 << 2))"
+        : after-shift
+      }
+      history 2
+      unset HISTFILE
+
+  - name: "cmdhist joins a block with a quoted here-document operator"
+    args: ["-o", "history"]
+    home_dir: "."
+    env:
+      HISTFILE: "history-file.txt"
+    stdin: |
+      { printf '%s\n' '<<'
+        : after-literal
+      }
+      history 2
+      unset HISTFILE
+
+  - name: "cmdhist joins around a substitution containing a quoted here-document operator"
+    args: ["-o", "history"]
+    home_dir: "."
+    env:
+      HISTFILE: "history-file.txt"
+    stdin: |
+      { printf '%s\n' "$(printf '%s' '<<')"
+        : after-substitution
+      }
+      history 2
+      unset HISTFILE
+
+  - name: "cmdhist joins a block containing a hash within a word"
+    args: ["-o", "history"]
+    home_dir: "."
+    env:
+      HISTFILE: "history-file.txt"
+    stdin: |
+      if true; then
+        : before-word
+        printf '%s\n' foo#bar; fi
+      history 2
+      unset HISTFILE
+
+  - name: "cmdhist joins a block with a parameter expansion operator"
+    args: ["-o", "history"]
+    home_dir: "."
+    env:
+      HISTFILE: "history-file.txt"
+    stdin: |
+      value=prefix-suffix
+      { printf '%s\n' ${value#prefix-}
+        : after-expansion
+      }
+      history 2
+      unset HISTFILE
+
+  - name: "cmdhist keeps the comment boundary inside nested control flow with a redirection"
+    args: ["-o", "history"]
+    home_dir: "."
+    env:
+      HISTFILE: "history-file.txt"
+    stdin: |
+      if true; then
+       for item in one; do
+        printf '%s\n' "$item" 2>capture.txt # trailing comment
+        echo after-comment
+       done
+      fi
+      history 2
+      unset HISTFILE
+
+  - name: "cmdhist joins a block with a comment on its last line"
+    args: ["-o", "history"]
+    home_dir: "."
+    env:
+      HISTFILE: "history-file.txt"
+    stdin: |
+      if true; then
+        echo before-comment
+      fi # trailing comment
+      history 2
+      unset HISTFILE
+
+  - name: "cmdhist keeps a nested substitution comment boundary"
+    args: ["-o", "history"]
+    home_dir: "."
+    env:
+      HISTFILE: "history-file.txt"
+    stdin: |
+      if true; then
+        printf '%s\n' "$(printf '%s' first # trailing comment in substitution
+        printf '%s' second)"
+      fi
+      history 2
+      unset HISTFILE
+
+  - name: "cmdhist joins a block with only a here-string"
+    args: ["-o", "history"]
+    home_dir: "."
+    env:
+      HISTFILE: "history-file.txt"
+    stdin: |
+      { cat <<< ignored
+        : after-here-string
+      }
+      history 2
+      unset HISTFILE
+
+  - name: "cmdhist preserves a here-document after a here-string with a trailing comment"
+    args: ["-o", "history"]
+    home_dir: "."
+    env:
+      HISTFILE: "history-file.txt"
+    stdin: |
+      cat <<< ignored <<'HIST_EOF' # trailing comment
+      # literal body
+      HIST_EOF
+      history 2
+      unset HISTFILE
+
+  - name: "cmdhist re-executes a nested here-document next to a here-string"
+    args: ["-o", "history"]
+    home_dir: "."
+    ignore_stderr: true # fc echoes the shell's history layout
+    env:
+      HISTFILE: "history-file.txt"
+    stdin: |
+      if true; then
+        : <<< ignored
+        cat <<'HIST_EOF'
+      kept-body
+      HIST_EOF
+        echo after-document
+      fi
+      unset HISTFILE
+      fc -s 'if true'
+
+  - name: "cmdhist preserves a quoted backslash-newline"
+    args: ["-o", "history"]
+    home_dir: "."
+    env:
+      HISTFILE: "history-file.txt"
+    stdin: |
+      if true; then
+        printf '%s\n' "quoted\
+      continuation"
+      fi
+      history 2
+      unset HISTFILE
+
+  - name: "cmdhist preserves a pair of backslashes at the end of a line"
+    args: ["-o", "history"]
+    home_dir: "."
+    env:
+      HISTFILE: "history-file.txt"
+    stdin: |
+      if true; then
+        printf '%s\n' escaped\\
+        echo after-backslash
+      fi
+      history 2
+      unset HISTFILE
+
   - name: "cmdhist joins backslash continuations"
     args: ["-o", "history"]
     env:

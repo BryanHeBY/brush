@@ -17,22 +17,53 @@ use crate::{
 
 /// Joins the lines of a multi-line command the way bash's `cmdhist` does.
 ///
-/// Newlines inside quotes and here-document bodies are part of the command and are kept as
-/// written. Elsewhere the entire command is parsed after trying `"; "` and then a space at each
-/// newline. This is stricter than inspecting the preceding word: it keeps two commands inside a
-/// block separate, while still leaving a space after `then`, `do`, or a trailing pipe.
+/// The tokenizer identifies continuations and the newline tokens eligible for joining. The
+/// parser then checks whether each eligible newline can become `"; "` or a space. This keeps
+/// separate commands in a block while allowing a space after `then`, `do`, or a trailing pipe.
 fn join_multiline_command(command: &str, parser_options: &brush_parser::ParserOptions) -> String {
-    if command.contains("<<") && !command.contains("<<<") {
-        // Bash keeps a trailing newline as part of a here-document history entry.
-        return format!("{command}\n");
-    }
-    if has_quoted_newline(command) || has_unquoted_hash(command) {
+    if !command.contains('\n') {
         return command.to_owned();
     }
 
-    let lines: Vec<&str> = command.lines().collect();
-    if lines.len() <= 1 {
+    let Ok(layout) = brush_parser::multiline_layout(command, parser_options) else {
         return command.to_owned();
+    };
+    if layout.has_here_document {
+        // Keep here-document lines together as entered, including their terminal newline.
+        return if command.ends_with('\n') {
+            command.to_owned()
+        } else {
+            format!("{command}\n")
+        };
+    }
+    if layout.line_breaks.is_empty() {
+        return command.to_owned();
+    }
+    let mut lines = Vec::with_capacity(layout.line_breaks.len() + 1);
+    let mut separators = Vec::with_capacity(layout.line_breaks.len());
+    let mut remaining = command;
+    let mut start = 0;
+    for line_break in layout.line_breaks {
+        let (offset, length, separator) = match line_break {
+            brush_parser::SourceLineBreak::Newline(offset) => (offset, 1, "\n"),
+            brush_parser::SourceLineBreak::Continuation(offset) => (offset - 1, 2, ""),
+        };
+        if offset + length == command.len() && separator == "\n" {
+            break;
+        }
+        let (line, tail) = remaining.split_at(offset - start);
+        lines.push(line);
+        separators.push(separator);
+        remaining = tail.split_at(length).1;
+        start = offset + length;
+    }
+    lines.push(remaining);
+
+    if let Some(replacements) = layout.newline_replacements {
+        for (separator, (_, replacement)) in separators.iter_mut().zip(replacements) {
+            *separator = replacement;
+        }
+        return render_history_lines(&lines, &separators);
     }
 
     let parse = |source: &str| {
@@ -40,11 +71,8 @@ fn join_multiline_command(command: &str, parser_options: &brush_parser::ParserOp
             .parse_program()
             .map(|_| ())
     };
-    let mut separators = vec!["\n"; lines.len() - 1];
-
     for boundary in 0..separators.len() {
-        if lines[boundary].ends_with('\\') {
-            separators[boundary] = "";
+        if separators[boundary].is_empty() {
             continue;
         }
 
@@ -65,87 +93,16 @@ fn join_multiline_command(command: &str, parser_options: &brush_parser::ParserOp
     }
 }
 
-/// Renders source lines with the chosen history separators, removing backslash-newline
-/// continuations.
+/// Renders source spans with the chosen history separators.
 fn render_history_lines(lines: &[&str], separators: &[&str]) -> String {
     let mut rendered = String::new();
     for (index, line) in lines.iter().enumerate() {
         if index > 0 {
             rendered.push_str(separators[index - 1]);
         }
-        if let Some(without_backslash) = line.strip_suffix('\\') {
-            rendered.push_str(without_backslash);
-        } else {
-            rendered.push_str(line);
-        }
+        rendered.push_str(line);
     }
     rendered
-}
-
-/// Returns true if `command` contains a `#` outside quotes. A newline after an inline
-/// comment is a shell syntax boundary; joining it with `; ` would put the following command
-/// inside the comment.
-fn has_unquoted_hash(command: &str) -> bool {
-    let mut quote = None;
-    let mut escaped = false;
-
-    for character in command.chars() {
-        if escaped {
-            escaped = false;
-            continue;
-        }
-        if let Some(open) = quote {
-            if character == '\\' && open == '"' {
-                escaped = true;
-            } else if character == open {
-                quote = None;
-            }
-        } else {
-            if character == '#' {
-                return true;
-            }
-            if character == '\'' || character == '"' {
-                quote = Some(character);
-            } else if character == '\\' {
-                escaped = true;
-            }
-        }
-    }
-    false
-}
-
-/// Returns true if a newline occurs while a single- or double-quoted string is open.
-fn has_quoted_newline(command: &str) -> bool {
-    let mut quote = None;
-    let mut escaped = false;
-
-    for character in command.chars() {
-        if escaped {
-            escaped = false;
-            continue;
-        }
-
-        match quote {
-            Some(open) => {
-                if character == '\\' && open == '"' {
-                    escaped = true;
-                } else if character == open {
-                    quote = None;
-                } else if character == '\n' {
-                    return true;
-                }
-            }
-            None => {
-                if character == '\'' || character == '"' {
-                    quote = Some(character);
-                } else if character == '\\' {
-                    escaped = true;
-                }
-            }
-        }
-    }
-
-    false
 }
 
 /// A cheap checksum of the last (up to) 256 bytes of `bytes`, used to notice that a file's
@@ -783,6 +740,32 @@ mod tests {
     use super::*;
     use crate::{history::History, variables::ShellVariable};
     use std::io::Write as _;
+
+    #[test]
+    fn cmdhist_joins_ordinary_lines_around_a_quoted_newline() {
+        let options = brush_parser::ParserOptions::default();
+        let source = "if (( 1 << 2 )); then\n  : '<<\n' é#word\n  : next\nfi\n";
+        let expected = "if (( 1 << 2 )); then   : '<<\n' é#word;   : next; fi\n";
+        assert_eq!(join_multiline_command(source, &options), expected);
+    }
+
+    #[test]
+    fn cmdhist_joins_each_non_comment_boundary() {
+        let options = brush_parser::ParserOptions::default();
+        let source = "if true; then\n: foo#bar\n: safe # comment\\\n: next\nfi";
+        let expected = "if true; then : foo#bar; : safe # comment\\\n: next; fi";
+        assert_eq!(join_multiline_command(source, &options), expected);
+    }
+
+    #[test]
+    fn cmdhist_keeps_the_source_of_a_nested_here_document() {
+        let options = brush_parser::ParserOptions::default();
+        let source = ": \"$(cat <<-'END' # comment\n\tbody\n\tEND\n)\" <<<word\n: next";
+        assert_eq!(
+            join_multiline_command(source, &options),
+            format!("{source}\n"),
+        );
+    }
 
     #[tokio::test]
     async fn share_reads_new_entries_after_an_atomic_rewrite() -> Result<(), error::Error> {

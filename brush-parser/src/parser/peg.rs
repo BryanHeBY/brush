@@ -34,6 +34,55 @@ peg::parser! {
                 ast::CompoundList(items)
             }
 
+        // For this subset, each list boundary is a single newline between complete pipelines
+        // or before the closing word of a compound list. `;` ends the same pipeline and is
+        // accepted by `separator` (or `separator_op` in `complete_command`), independently
+        // of the other boundaries. Each pipeline ends in a word or `)`, so the semicolon
+        // cannot merge with the preceding token. After `then` or `{` a space keeps the words
+        // separate and leaves the list's leading `linebreak` empty. A semicolon cannot start
+        // a list item there. The tokenizer's eligible offsets must match the ones returned
+        // here so protected newlines and newlines consumed within a pipeline are left to the
+        // caller's context-specific checks.
+        pub(crate) rule ordinary_line_joins() -> Vec<(usize, &'static str)> =
+            joins:(
+                specific_word("if") ordinary_line_command() specific_operator(";") specific_word("then") body:ordinary_line_body("fi") { body } /
+                specific_word("{") body:ordinary_line_body("}") { body } /
+                ordinary_line_list()
+            ) last:source_newline()? {
+                let mut joins = joins;
+                if let Some(offset) = last {
+                    joins.push((offset, "; "));
+                }
+                joins
+            }
+
+        rule ordinary_line_body(end_word: &str) -> Vec<(usize, &'static str)> =
+            first:source_newline()? joins:ordinary_line_list()
+            last:(n:source_newline() { Some(n) } / specific_operator(";") { None }) specific_word(end_word) {
+                let mut joins = joins;
+                if let Some(offset) = first {
+                    joins.insert(0, (offset, " "));
+                }
+                if let Some(offset) = last {
+                    joins.push((offset, "; "));
+                }
+                joins
+            }
+
+        rule ordinary_line_list() -> Vec<(usize, &'static str)> =
+            ordinary_line_command() joins:(n:source_newline() ordinary_line_command() { (n, "; ") })* { joins }
+
+        rule ordinary_line_command() =
+            p:pipeline() {?
+                match p.seq.as_slice() {
+                    [ast::Command::Simple(_) | ast::Command::Compound(ast::CompoundCommand::Arithmetic(_), _)] => Ok(()),
+                    _ => Err("ordinary history command"),
+                }
+            }
+
+        rule source_newline() -> usize =
+            n:specific_operator("\n") { n.location().start.byte_offset }
+
         rule and_or() -> ast::AndOrList =
             first:pipeline() additional:_and_or_item()* { ast::AndOrList { first, additional } }
 

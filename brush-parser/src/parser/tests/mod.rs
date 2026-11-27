@@ -16,10 +16,48 @@ mod simple_commands;
 
 use crate::ast::Program;
 use crate::error::ParseError;
-use crate::parser::{Parser, ParserImpl, ParserOptions};
+use crate::parser::{Parser, ParserImpl, ParserOptions, multiline_layout};
 use anyhow::Result;
 #[cfg(feature = "winnow-parser")]
 use serde_json::Value;
+
+#[test]
+fn ordinary_line_joins_assign_separators_to_source_offsets() {
+    let options = ParserOptions::default();
+    for (input, separators) in [
+        (": é#word '<<'\n(( 1 << 2 ))", &["; "][..]),
+        (
+            "if (( 1 << 2 )); then\n  : '<<' é#word\n  : next\nfi",
+            &[" ", "; ", "; "],
+        ),
+        ("{\n  : first\n  : second; }", &[" ", "; "]),
+    ] {
+        let expected: Vec<_> = input
+            .match_indices('\n')
+            .map(|(offset, _)| offset)
+            .zip(separators.iter().copied())
+            .collect();
+        let layout = multiline_layout(input, &options).unwrap();
+        assert_eq!(layout.newline_replacements, Some(expected), "{input:?}");
+    }
+}
+
+#[test]
+fn ordinary_line_joins_defer_to_context_for_ambiguous_boundaries() {
+    let options = ParserOptions::default();
+    for input in [
+        "if true; then\n  : first # comment\n  : next\nfi",
+        ": first;\n: second",
+        ": first |\n: second\n: third",
+        ": first\n\n: second",
+        ": first \\\n  word\n: second",
+        "(( 1\n  << 2 ))\n: next",
+        "time if true; then\n  : first\nfi",
+    ] {
+        let layout = multiline_layout(input, &options).unwrap();
+        assert!(layout.newline_replacements.is_none(), "{input:?}");
+    }
+}
 
 /// Wrapper struct for serializing parse results with input context
 #[derive(serde::Serialize)]

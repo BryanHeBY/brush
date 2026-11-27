@@ -3,7 +3,10 @@ use std::path::PathBuf;
 use bon::bon;
 
 use crate::ast;
-use crate::tokenizer::{Token, TokenEndReason, Tokenizer, TokenizerOptions, Tokens};
+use crate::tokenizer::{
+    MultilineLayout, SourceLineBreak, Token, TokenEndReason, Tokenizer, TokenizerError,
+    TokenizerOptions, Tokens, tokenize_multiline,
+};
 
 pub mod peg;
 #[cfg(feature = "winnow-parser")]
@@ -59,6 +62,31 @@ impl ParserOptions {
             sh_mode: self.sh_mode,
         }
     }
+}
+
+/// Identifies here-documents and candidate line-joining boundaries in shell source.
+///
+/// When the grammar recognizes a list of ordinary commands with independent boundaries, the
+/// layout also includes the replacement for each boundary. Newlines inside words or after
+/// comments are kept in the source.
+pub fn multiline_layout(
+    input: &str,
+    options: &ParserOptions,
+) -> Result<MultilineLayout, TokenizerError> {
+    let (mut layout, tokens) = tokenize_multiline(input, &options.tokenizer_options())?;
+    if layout.line_breaks.is_empty() || options.parser_impl != ParserImpl::Peg {
+        return Ok(layout);
+    }
+
+    if let Ok(replacements) =
+        peg::token_parser::ordinary_line_joins(&Tokens { tokens: &tokens }, options)
+        && layout.line_breaks.iter().copied().eq(replacements
+            .iter()
+            .map(|&(offset, _)| SourceLineBreak::Newline(offset)))
+    {
+        layout.newline_replacements = Some(replacements);
+    }
+    Ok(layout)
 }
 
 /// Information about the source of tokens.
